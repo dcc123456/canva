@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>minipdf-scaffold</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      (function () {
+        if (typeof Map === 'undefined') return;
+        if (!Map.prototype.getOrInsertComputed) {
+          Map.prototype.getOrInsertComputed = function (key, compute) {
+            if (this.has(key)) return this.get(key);
+            var value = compute();
+            this.set(key, value);
+            return value;
+          };
+        }
+        if (typeof WeakMap !== 'undefined' && !WeakMap.prototype.getOrInsertComputed) {
+          WeakMap.prototype.getOrInsertComputed = function (key, compute) {
+            if (this.has(key)) return this.get(key);
+            var value = compute();
+            this.set(key, value);
+            return value;
+          };
+        }
+      })();
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
