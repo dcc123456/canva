@@ -29,16 +29,10 @@ import type {
   FormField,
   ParseFormFieldsOptions,
   TextBlock,
-  WriteFormFieldsOptions,
-  WriteFormFieldsResult,
-  WriteTextBlockOptions,
-  WriteTextBlockResult,
 } from '../engine/types';
 import { pdfLibFallbackEngine as pdfLibFallback } from '../engine/pdfLibFallback';
 import { asPdfium, free, malloc, mallocFromBytes, mallocFromString, readUtf16LE, type PdfiumLike } from './helpers';
 import { loadPdfium } from './loader';
-
-const FPDF_PAGEOBJ_TEXT = 1 as const;
 
 // ---------- low-level helpers -----------------------------------------------
 
@@ -153,100 +147,6 @@ async function detectTextBlocksImpl(
   }
 }
 
-// ---------- writeTextBlock ---------------------------------------------------
-
-async function writeTextBlockImpl(
-  mod: PdfiumLike,
-  bytes: Uint8Array,
-  pageIndex: number,
-  block: TextBlock
-): Promise<Uint8Array> {
-  const docPtr = openDocument(mod, bytes);
-  let pagePtr = 0;
-  try {
-    pagePtr = loadPage(mod, docPtr, pageIndex);
-    const FPDF = mod as unknown as {
-      FPDFPage_CountObjects: (n: number) => number;
-      FPDFPage_GetObject: (a: number, b: number) => number;
-      FPDFPageObj_GetType: (n: number) => number;
-      FPDFPageObj_GetBounds: (a: number, b: number, c: number, d: number, e: number) => boolean;
-      FPDFPageObj_Destroy: (n: number) => boolean;
-      FPDFPage_GenerateContent: (n: number) => boolean;
-      FPDF_SaveAsCopy: (a: number, b: number, c: number, d: number) => boolean;
-    };
-    const objCount = FPDF.FPDFPage_CountObjects(pagePtr);
-    let destroyed = false;
-    for (let i = 0; i < objCount; i += 1) {
-      const obj = FPDF.FPDFPage_GetObject(pagePtr, i);
-      const type = FPDF.FPDFPageObj_GetType(obj);
-      if (type !== FPDF_PAGEOBJ_TEXT) continue;
-      const lPtr = malloc(mod, 4);
-      const bPtr = malloc(mod, 4);
-      const rPtr = malloc(mod, 4);
-      const tPtr = malloc(mod, 4);
-      const ok = FPDF.FPDFPageObj_GetBounds(obj, lPtr, bPtr, rPtr, tPtr);
-      const view = mod.pdfium.HEAPU32;
-      const x1 = ok ? view[lPtr >> 2] : 0;
-      const y1 = ok ? view[bPtr >> 2] : 0;
-      const x2 = ok ? view[rPtr >> 2] : 0;
-      const y2 = ok ? view[tPtr >> 2] : 0;
-      free(mod, lPtr);
-      free(mod, bPtr);
-      free(mod, rPtr);
-      free(mod, tPtr);
-      if (!ok) continue;
-      const { x: ox, y: oy, w: ow, h: oh } = block.bbox;
-      // 2pt tolerance compensates for PDFium's bbox rounding.
-      const overlap =
-        x1 <= ox + ow + 2 &&
-        x2 >= ox - 2 &&
-        y1 <= oy + oh + 2 &&
-        y2 >= oy - 2;
-      if (!overlap) continue;
-      FPDF.FPDFPageObj_Destroy(obj);
-      destroyed = true;
-      break;
-    }
-    if (!destroyed) {
-      console.warn(
-        '[pdfiumEngine] could not match page text object for block',
-        block.id
-      );
-    }
-    FPDF.FPDFPage_GenerateContent(pagePtr);
-
-    // Save the modified doc into a wasm buffer, then drain it into a
-    // fresh Uint8Array so the caller doesn't end up holding a pointer
-    // into the wasm heap (which can move across module grow calls).
-    const cap = bytes.byteLength * 2 + 8192;
-    const bufPtr = malloc(mod, cap);
-    try {
-      const ok = FPDF.FPDF_SaveAsCopy(docPtr, bufPtr, cap, 0);
-      if (!ok) throw new Error('PDFium: FPDF_SaveAsCopy failed');
-      const slice = new Uint8Array(mod.pdfium.HEAPU8.buffer, bufPtr, cap);
-      const idx = lastIndexOfMarker(slice, '%%EOF');
-      const len = idx >= 0 ? Math.min(cap, idx + 7) : cap;
-      return new Uint8Array(slice.subarray(0, len));
-    } finally {
-      free(mod, bufPtr);
-    }
-  } finally {
-    if (pagePtr) closePage(mod, pagePtr);
-    closeDoc(mod, docPtr);
-  }
-}
-
-function lastIndexOfMarker(buf: Uint8Array, marker: string): number {
-  const needle = new TextEncoder().encode(marker);
-  outer: for (let i = buf.length - needle.length; i >= 0; i -= 1) {
-    for (let j = 0; j < needle.length; j += 1) {
-      if (buf[i + j] !== needle[j]) continue outer;
-    }
-    return i;
-  }
-  return -1;
-}
-
 // ---------- EngineInterface glue --------------------------------------------
 
 export const pdfiumEngine: EngineInterface = {
@@ -257,24 +157,8 @@ export const pdfiumEngine: EngineInterface = {
     return detectTextBlocksImpl(asPdfium(mod), new Uint8Array(pdfBytes), pageIndex);
   },
 
-  async writeTextBlock({ pdfBytes, pageIndex, block, newText }: WriteTextBlockOptions): Promise<WriteTextBlockResult> {
-    const mod = await loadPdfium();
-    const cleaned = new Uint8Array(pdfBytes);
-    const bytes = await writeTextBlockImpl(asPdfium(mod), cleaned, pageIndex, block);
-    // newText isn't strictly needed for the delete step (the store is
-    // the source of truth for the new visual text), but we surface it
-    // in a future enhancement where PDFium's FPDFText_SetText could be
-    // tried; for now it's purely informative.
-    void newText;
-    return { bytes, source: 'pdfium' };
-  },
-
   async parseFormFields({ pdfBytes }: ParseFormFieldsOptions): Promise<FormField[]> {
     return pdfLibFallback.parseFormFields({ pdfBytes });
-  },
-
-  async writeFormFields(options: WriteFormFieldsOptions): Promise<WriteFormFieldsResult> {
-    return pdfLibFallback.writeFormFields(options);
   },
 };
 

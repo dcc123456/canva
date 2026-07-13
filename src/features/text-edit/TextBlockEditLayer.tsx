@@ -2,8 +2,12 @@
 //
 // Floating textarea editor for `text-block` overlays. Shown above the
 // canvas when the user clicks a text-block while the `edit-text` tool
-// is active. On commit (blur or Ctrl+Enter) it asks the engine to
-// write the new text back into the PDF and updates the store.
+// is active. On commit (blur or Ctrl+Enter) it updates the overlay's
+// text in place -- no engine round-trip, no pdfBytes rewrite.
+//
+// 重构后:提交是同步的(只调 useCommitTextBlock -> updateOverlay)。
+// 原 PDF 字节始终不动,画布上的原字由 pdfjs 渲染,已编辑的 block 在
+// ElementRenderer 里用白底矩形盖住原字 + 画 SVG 新文字。
 //
 // Selection 行为:
 //   * 单击 block:仅选中 (selectedOverlayId = block.id),让右侧
@@ -13,7 +17,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useDocumentStore } from '../../store/documentStore';
 import { useEditorStore } from '../../store/editorStore';
-import { ensureEngine } from '../../core/engine';
 import { useCommitTextBlock } from './useCommitTextBlock';
 import type { TextBlockItem, PageMeta } from '../../core/types';
 
@@ -39,8 +42,8 @@ export function TextBlockEditLayer({ page }: TextBlockEditLayerProps) {
   const draftRef = useRef<string>('');
   const containerRef = useRef<HTMLDivElement | null>(null);
 
-  // 共享的"写回 PDF 字节流"逻辑(同样被 Inspector 用)。
-  const { commit: commitToEngine, busy, error, clearError } = useCommitTextBlock();
+  // 共享的"写回 overlay"逻辑(同样被 Inspector 用)。
+  const { commit: commitToOverlay } = useCommitTextBlock();
 
   useEffect(() => {
     if (tool !== 'edit-text') {
@@ -55,31 +58,21 @@ export function TextBlockEditLayer({ page }: TextBlockEditLayerProps) {
 
   function selectOnly(block: TextBlockItem) {
     setSelectedOverlayId(block.id);
-    clearError();
-    // Pre-warm the engine so the first commit isn't slowed down.
-    void ensureEngine('edit').catch(() => undefined);
   }
 
   function startEdit(block: TextBlockItem) {
     draftRef.current = block.text;
     setEditingId(block.id);
     setSelectedOverlayId(block.id);
-    clearError();
-    void ensureEngine('edit').catch(() => undefined);
   }
 
-  async function commit(block: TextBlockItem | undefined, newText: string) {
+  function commitEdit(block: TextBlockItem | undefined, newText: string) {
     if (!block) {
       setEditingId(null);
       return;
     }
-    const ok = await commitToEngine({ block, pageIndex: page.index, newText });
-    if (ok) setEditingId(null);
-  }
-
-  function cancel() {
+    commitToOverlay({ block, pageIndex: page.index, newText });
     setEditingId(null);
-    clearError();
   }
 
   return (
@@ -131,7 +124,7 @@ export function TextBlockEditLayer({ page }: TextBlockEditLayerProps) {
               <textarea
                 // Re-mount the textarea whenever we switch which block is
                 // being edited. This guarantees a fresh DOM node and
-                // guarantees the ref callback runs — without it, React
+                // guarantees the ref callback runs - without it, React
                 // reuses the old textarea and the `select()` would point
                 // to stale text.
                 key={b.id}
@@ -155,18 +148,18 @@ export function TextBlockEditLayer({ page }: TextBlockEditLayerProps) {
                   draftRef.current = e.currentTarget.value;
                 }}
                 onBlur={(e) => {
-                  void commit(b, e.currentTarget.value);
+                  commitEdit(b, e.currentTarget.value);
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
                     e.preventDefault();
-                    void commit(
+                    commitEdit(
                       b,
                       (e.currentTarget as HTMLTextAreaElement).value
                     );
                   } else if (e.key === 'Escape') {
                     e.preventDefault();
-                    cancel();
+                    setEditingId(null);
                   }
                 }}
                 // Stop events from bubbling up to the wrapper div so we
@@ -176,22 +169,7 @@ export function TextBlockEditLayer({ page }: TextBlockEditLayerProps) {
                 className="h-full w-full resize-none border-0 bg-white/95 p-1 text-xs text-gray-900 outline-none ring-0 focus:bg-white"
                 style={{ fontSize: Math.max(8, b.bbox.h * zoom * 0.7) }}
               />
-            ) : (
-              // 非编辑态: 只保留蓝色虚线框,不再叠加预览文字 ——
-              // 因为原 PDF 字符已经在画布同一位置渲染,再画一遍
-              // 会跟原文字重叠造成"看不清字"的观感。"兜底"角标
-              // 仍然显示在右上角,提示用户当前引擎是哪条路径。
-              <div className="pointer-events-none absolute right-0 top-0 flex items-start">
-                {b.source === 'pdflib-overlay' && (
-                  <span
-                    className="rounded bg-amber-100 px-1 text-[9px] text-amber-800"
-                    title="未加载 MuPDF/PDFium,使用兜底引擎(pdf-lib 白底覆盖 + 重绘),非字节级 in-place 改写。"
-                  >
-                    兜底
-                  </span>
-                )}
-              </div>
-            )}
+            ) : null}
             {!isEditing && (
               <button
                 type="button"
@@ -209,16 +187,6 @@ export function TextBlockEditLayer({ page }: TextBlockEditLayerProps) {
           </div>
         );
       })}
-      {error && (
-        <div className="pointer-events-auto absolute left-2 top-2 max-w-[300px] rounded border border-red-300 bg-red-50 p-2 text-xs text-red-700">
-          {error}
-        </div>
-      )}
-      {busy && (
-        <div className="pointer-events-none absolute right-2 top-2 rounded bg-blue-600 px-2 py-1 text-[10px] text-white">
-          正在写回…
-        </div>
-      )}
     </div>
   );
 }

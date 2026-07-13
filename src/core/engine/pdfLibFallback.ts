@@ -4,18 +4,11 @@
 // `package.json`:
 //
 //   * `pdfjs-dist` provides `getTextContent` (yields per-glyph TextItems
-//     with a transform matrix in PDF user-space units — i.e. PDF points
-//     relative to the page, but still in a 1× viewport) and
+//     with a transform matrix in PDF user-space units) and
 //     `getFieldObjects` (AcroForm enumeration).
-//   * `pdf-lib` is used to: (a) white-out the original block area with a
-//     `drawRectangle` and (b) write the new text with `drawText` at the
-//     same baseline.
 //
-// We never modify the original PDF in place; we always produce a fresh
-// `Uint8Array` and bubble it up so the document store can replace its
-// `pdfBytes`.
-import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
-import type { PDFFont } from 'pdf-lib';
+// 重构后只保留 detect/parse 只读能力。文本编辑和表单写入不再走引擎 --
+// 编辑只改 overlay,导出时用 pdf-lib 统一应用。
 import { loadDocument, pdfjsLib } from '../pdf/loader';
 import type {
   DetectTextBlocksOptions,
@@ -23,10 +16,6 @@ import type {
   FormField,
   ParseFormFieldsOptions,
   TextBlock,
-  WriteFormFieldsOptions,
-  WriteFormFieldsResult,
-  WriteTextBlockOptions,
-  WriteTextBlockResult,
 } from './types';
 import type { Rect } from '../types';
 
@@ -54,7 +43,7 @@ function isTextItem(it: unknown): it is PdfJsTextItem {
 function clusterIntoLines(
   items: PdfJsTextItem[]
 ): Array<{ y: number; items: PdfJsTextItem[] }> {
-  // Sort by baseline y (transform[5]) desc — pdfjs y is bottom-up.
+  // Sort by baseline y (transform[5]) desc - pdfjs y is bottom-up.
   const sorted = [...items].sort((a, b) => b.transform[5] - a.transform[5]);
   const lines: Array<{ y: number; items: PdfJsTextItem[] }> = [];
   for (const it of sorted) {
@@ -134,48 +123,28 @@ async function detectTextBlocksImpl(
   return blocks;
 }
 
-function pickFallbackFont(name: string): StandardFonts {
-  const lower = name.toLowerCase();
-  if (lower.includes('bold') && lower.includes('italic')) {
-    return StandardFonts.HelveticaBoldOblique;
-  }
-  if (lower.includes('bold')) return StandardFonts.HelveticaBold;
-  if (lower.includes('italic') || lower.includes('oblique')) {
-    return StandardFonts.HelveticaOblique;
-  }
-  return StandardFonts.Helvetica;
+function mapFieldKind(
+  type: string | undefined,
+  hasOptions: boolean
+): FormField['kind'] {
+  const t = (type ?? '').toLowerCase();
+  if (t === 'tx' || t === 'text') return 'text';
+  if (t === 'ch') return hasOptions ? 'select' : 'text';
+  if (t === 'sig') return 'signature';
+  if (t === 'btn') return 'checkbox';
+  if (t === 'radio') return 'radio';
+  return 'text';
 }
 
-async function writeTextBlockImpl(
-  opts: WriteTextBlockOptions
-): Promise<WriteTextBlockResult> {
-  const src = await PDFDocument.load(opts.pdfBytes);
-  const page = src.getPage(opts.pageIndex);
-  const pageHeight = page.getHeight();
-  const fontName = pickFallbackFont(opts.block.font);
-  const font: PDFFont = await src.embedFont(fontName);
-  // White-out the original area.
-  page.drawRectangle({
-    x: opts.block.bbox.x,
-    y: pageHeight - opts.block.bbox.y - opts.block.bbox.h,
-    width: opts.block.bbox.w,
-    height: opts.block.bbox.h,
-    color: rgb(1, 1, 1),
-    opacity: 1,
-  });
-  const fontSize = Math.max(opts.block.fontSize, 6);
-  // Anchor baseline near the bottom of the bbox.
-  const baselineY = pageHeight - opts.block.bbox.y - fontSize;
-  page.drawText(opts.newText, {
-    x: opts.block.bbox.x,
-    y: baselineY,
-    size: fontSize,
-    font,
-    color: rgb(0, 0, 0),
-    maxWidth: opts.block.bbox.w,
-  });
-  const bytes = await src.save();
-  return { bytes, source: 'pdflib-overlay' };
+function normaliseValue(
+  value: string | string[] | boolean | undefined,
+  kind: FormField['kind']
+): string | boolean {
+  if (kind === 'checkbox' || typeof value === 'boolean') {
+    return !!value;
+  }
+  if (Array.isArray(value)) return value.join(', ');
+  return value ?? '';
 }
 
 async function parseFormFieldsImpl(
@@ -188,7 +157,7 @@ async function parseFormFieldsImpl(
   const raw = await doc.getFieldObjects();
   const fields: FormField[] = [];
   if (!raw) return fields;
-  // Cache per-page viewport for bbox → pageIndex lookup.
+  // Cache per-page viewport for bbox -> pageIndex lookup.
   const viewportByPage: Array<{ width: number; height: number }> = [];
   for (let i = 1; i <= doc.numPages; i += 1) {
     const page = await doc.getPage(i);
@@ -247,71 +216,10 @@ async function parseFormFieldsImpl(
   return fields;
 }
 
-function mapFieldKind(
-  type: string | undefined,
-  hasOptions: boolean
-): FormField['kind'] {
-  const t = (type ?? '').toLowerCase();
-  if (t === 'tx' || t === 'text') return 'text';
-  if (t === 'ch') return hasOptions ? 'select' : 'text';
-  if (t === 'sig') return 'signature';
-  if (t === 'btn') return 'checkbox';
-  if (t === 'radio') return 'radio';
-  return 'text';
-}
-
-function normaliseValue(
-  value: string | string[] | boolean | undefined,
-  kind: FormField['kind']
-): string | boolean {
-  if (kind === 'checkbox' || typeof value === 'boolean') {
-    return !!value;
-  }
-  if (Array.isArray(value)) return value.join(', ');
-  return value ?? '';
-}
-
-async function writeFormFieldsImpl(
-  opts: WriteFormFieldsOptions
-): Promise<WriteFormFieldsResult> {
-  const src = await PDFDocument.load(opts.pdfBytes);
-  const form = src.getForm();
-  for (const field of opts.values) {
-    try {
-      if (field.kind === 'checkbox') {
-        const cb = form.getCheckBox(field.fieldName);
-        cb.check();
-      } else if (field.kind === 'radio' || field.kind === 'select') {
-        // pdf-lib's Dropdown / OptionList are the safest match for `Ch`
-        // (choice) fields; we use the dropdown variant.
-        const dd = form.getDropdown(field.fieldName);
-        const v = String(field.value);
-        if (v) dd.select(v);
-      } else {
-        // text / signature both go through getTextField.
-        const tf = form.getTextField(field.fieldName);
-        const v = String(field.value);
-        tf.setText(v);
-      }
-    } catch (err) {
-      // Field name might not exist in the underlying PDF; ignore so the
-      // rest of the form can still be written.
-      console.warn(
-        `[pdfLibFallback] failed to set form field "${field.fieldName}":`,
-        err
-      );
-    }
-  }
-  const bytes = await src.save();
-  return { bytes, source: 'pdflib-overlay' };
-}
-
 export const pdfLibFallbackEngine: EngineInterface = {
   kind: 'pdflib-overlay',
   detectTextBlocks: detectTextBlocksImpl,
-  writeTextBlock: writeTextBlockImpl,
   parseFormFields: parseFormFieldsImpl,
-  writeFormFields: writeFormFieldsImpl,
 };
 
 void pdfjsLib;

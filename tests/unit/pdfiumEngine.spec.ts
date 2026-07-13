@@ -38,11 +38,9 @@ describe('pdfiumEngine', () => {
     expect(pdfiumEngine.kind).toBe('pdfium');
   });
 
-  it('exposes the four EngineInterface methods', () => {
+  it('exposes the two EngineInterface methods (detect/parse)', () => {
     expect(typeof pdfiumEngine.detectTextBlocks).toBe('function');
-    expect(typeof pdfiumEngine.writeTextBlock).toBe('function');
     expect(typeof pdfiumEngine.parseFormFields).toBe('function');
-    expect(typeof pdfiumEngine.writeFormFields).toBe('function');
   });
 
   it('detectTextBlocks rejects gracefully when wasm is unreachable in this env', async () => {

@@ -82,15 +82,20 @@ export interface DrawingItem extends OverlayBase {
 }
 
 // F10
+// 重构后文本编辑只更新 overlay，不再回写 pdfBytes。
+// "是否被编辑过" = text !== originalText || bbox 移动了；
+// 导出时据此决定是否需要在原 PDF 上对原字做字符级白底覆盖并重画新字。
+// originalBbox 是检测时的原始位置(永不改)，bbox 是当前位置(可被拖动)。
+// 白底画在 originalBbox(盖原字)，新字画在 bbox(新位置)。
 export interface TextBlockItem extends OverlayBase {
   type: 'text-block';
   bbox: Rect;
+  originalBbox: Rect;
   originalText: string;
   text: string;
   font: string;
   fontSize: number;
   color: string;
-  source: 'mupdf' | 'pdflib-overlay' | 'pdfium';
 }
 
 // F11

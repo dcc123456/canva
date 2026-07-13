@@ -534,45 +534,20 @@ function TextBlockControls({
     setDraft(item.text);
   }, [item.id, item.text]);
 
-  const { commit, busy, error, clearError } = useCommitTextBlock();
+  const { commit } = useCommitTextBlock();
   const fontIsBuiltin = isBuiltinFont(item.font);
   const dirty = draft !== item.text;
 
-  async function flush() {
+  function flush() {
     if (!dirty) return;
     if (!page) return;
-    await commit({ block: item, pageIndex: page.index, newText: draft });
+    commit({ block: item, pageIndex: page.index, newText: draft });
   }
 
   return (
     <div className="rounded border bg-white p-2">
-      <div className="mb-2 flex items-center justify-between">
-        <div className="text-[11px] uppercase tracking-wide text-gray-400">
-          原文本块
-        </div>
-        <span
-          className={clsx(
-            'rounded px-1 text-[9px]',
-            item.source === 'mupdf'
-              ? 'bg-emerald-100 text-emerald-800'
-              : item.source === 'pdfium'
-              ? 'bg-sky-100 text-sky-800'
-              : 'bg-amber-100 text-amber-800'
-          )}
-          title={
-            item.source === 'mupdf'
-              ? 'MuPDF.js: applyRedactions 字节级删原字 + 在原位重画'
-              : item.source === 'pdfium'
-              ? 'PDFium WASM: 销毁原 text object + 在原位重画'
-              : 'pdf-lib 兜底: 白底覆盖 + 重画(非字节级)'
-          }
-        >
-          {item.source === 'mupdf'
-            ? 'MuPDF'
-            : item.source === 'pdfium'
-            ? 'PDFium'
-            : '兜底'}
-        </span>
+      <div className="mb-2 text-[11px] uppercase tracking-wide text-gray-400">
+        原文本块
       </div>
 
       <div className="flex flex-col gap-2">
@@ -587,15 +562,14 @@ function TextBlockControls({
             value={draft}
             onChange={(e) => {
               setDraft(e.target.value);
-              if (error) clearError();
             }}
             onBlur={() => {
-              void flush();
+              flush();
             }}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
                 e.preventDefault();
-                void flush();
+                flush();
               } else if (e.key === 'Escape') {
                 e.preventDefault();
                 setDraft(item.text);
@@ -603,7 +577,6 @@ function TextBlockControls({
             }}
             rows={3}
             className="rounded border px-1 py-0.5"
-            disabled={busy}
             placeholder="(空)"
           />
           <div className="flex items-center justify-between gap-2 text-[10px] text-gray-500">
@@ -611,22 +584,19 @@ function TextBlockControls({
             <button
               type="button"
               onClick={() => {
-                void flush();
+                flush();
               }}
-              disabled={!dirty || busy}
+              disabled={!dirty}
               className={clsx(
                 'rounded border px-2 py-0.5 text-[10px]',
-                dirty && !busy
+                dirty
                   ? 'border-blue-400 bg-blue-50 text-blue-700 hover:bg-blue-100'
                   : 'border-gray-200 bg-gray-50 text-gray-400'
               )}
             >
-              {busy ? '写回中…' : '提交'}
+              提交
             </button>
           </div>
-          {error && (
-            <span className="text-[10px] text-red-600">{error}</span>
-          )}
         </label>
 
         <label className="flex flex-col gap-1 text-xs text-gray-600">

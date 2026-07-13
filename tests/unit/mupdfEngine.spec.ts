@@ -14,10 +14,8 @@ describe('mupdfEngine', () => {
     expect(mupdfEngine.kind).toBe('mupdf');
   });
 
-  it('exposes the four EngineInterface methods', () => {
+  it('exposes the two EngineInterface methods (detect/parse)', () => {
     expect(typeof mupdfEngine.detectTextBlocks).toBe('function');
-    expect(typeof mupdfEngine.writeTextBlock).toBe('function');
     expect(typeof mupdfEngine.parseFormFields).toBe('function');
-    expect(typeof mupdfEngine.writeFormFields).toBe('function');
   });
 });

@@ -134,7 +134,7 @@ export function Toolbar({
             )
             .forEach((o) => removeOverlay(o.id));
         }
-        const { blocks, source } = await detectTextBlocksForPage({
+        const { blocks } = await detectTextBlocksForPage({
           pageIndex,
           pdfBytes: safeBytes,
           onProgress: (p, label) => {
@@ -149,12 +149,12 @@ export function Toolbar({
               pageId: currentPage.id,
               type: 'text-block',
               bbox: b.bbox,
+              originalBbox: b.bbox,
               originalText: b.text,
               text: b.text,
               font: b.font,
               fontSize: b.fontSize,
               color: b.color,
-              source,
             });
           }
         }

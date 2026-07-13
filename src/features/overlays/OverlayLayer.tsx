@@ -53,14 +53,30 @@ export function OverlayLayer({ page }: OverlayLayerProps) {
           }}
           style={{ pointerEvents: tool === 'select' ? 'auto' : 'none' }}
         >
-          <ElementRenderer overlay={o} />
+          <ElementRenderer overlay={o} selected={o.id === selectedOverlayId} />
           {/* For types that are pointer-inert, we add a transparent hit area. */}
           {(o.type === 'image' || o.type === 'highlight' || o.type === 'text-block' || o.type === 'form-field') && (
             <OverlayHitArea overlay={o} />
           )}
         </g>
       ))}
-      {selected && <SelectionFrame overlay={selected} zoom={zoom} />}
+      {/* SelectionFrame 渲染在 svg 的"overlay 通道",独立 pointerEvents
+          控制,这样即便 user 在非 select 工具(比如编辑文字)选中
+          了一个块,Inspector 改字体颜色后我们也能拖它调整位置 ——
+          否则 svg 在非 select 工具下整体 pointerEvents=none 就完
+          全拖不动了。 */}
+      {selected && (
+        <g
+          style={{
+            pointerEvents:
+              tool === 'select' || selected.type === 'text-block'
+                ? 'all'
+                : 'none',
+          }}
+        >
+          <SelectionFrame overlay={selected} zoom={zoom} />
+        </g>
+      )}
     </svg>
   );
 }

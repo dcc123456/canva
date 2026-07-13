@@ -1,18 +1,34 @@
-// exportPdf.ts: serialize the current editor state to a PDF file and
-// trigger a browser download.
+// exportPdf.ts: 重构后的单一导出管线。
+//
+// 架构:矢量保留 + 编辑分离 + 导出统一管线。
+//   1. 加载干净的原 pdfBytes(编辑过程从未改写) -> PDFDocument
+//   2. applyPages (copyPages + 旋转,保留页面管理)
+//   3. applyTextBlockEdits (对已编辑的 text-block: MuPDF 字符 quad
+//      白底 + pdf-lib 重画新字)
+//   4. flattenOverlays (非 text-block 的 overlay: highlight/note/
+//      text/image/drawing)
+//   5. createFormFields (pdf-lib form API 重建 AcroForm)
+//   6. save -> 下载
+//
+// 关键改进:
+//   * 画布与导出用同一套"原字 + 白底 + 新字"模型,不再有两套路径不一致
+//   * 没有 source 字段分叉,没有 pendingTextBlocks 的 engine 往返
+//   * 原 PDF 矢量保留,未编辑文字仍可搜索/复制
 import { PDFDocument } from 'pdf-lib';
 import { useDocumentStore } from '../../store/documentStore';
 import { applyPages } from '../../core/writer/pages';
 import { flattenOverlays } from '../../core/writer/flatten';
+import { applyTextBlockEdits } from '../../core/writer/textBlockEdits';
+import { createFormFields } from '../../core/writer/formFields';
+import { loadCjkFontBytes } from '../../core/writer/cjkFont';
 import { downloadBlob } from '../../utils/download';
-import { ensureEngine, getCachedEngine } from '../../core/engine';
 import type {
   FormFieldItem,
   TextBlockItem,
 } from '../../core/types';
 
 export interface ExportProgress {
-  phase: 'load' | 'pages' | 'engine' | 'flatten' | 'save' | 'done';
+  phase: 'load' | 'pages' | 'textedits' | 'flatten' | 'forms' | 'save' | 'done';
 }
 
 export interface ExportResult {
@@ -32,13 +48,13 @@ export async function exportPdf(
   let doc: PDFDocument;
   let originalBytes: Uint8Array;
   if (pdfBytes) {
-    // Copy the bytes so pdf-lib can mutate the buffer freely.
+    // pdfBytes 是干净的原 PDF -- 编辑过程从不改写它。
+    // 用 load() 保留完整 PDF 上下文(字体/资源字典),applyPages
+    // 内部会先清空 doc 的页面再 copyPages,避免 2N 页重复。
     originalBytes = pdfBytes.slice();
     doc = await PDFDocument.load(originalBytes);
   } else {
-    // Brand-new blank document: build a fresh PDFDocument. The pages
-    // produced here are also "blank" in the editor's sense, so
-    // applyPages just adds them at the right sizes.
+    // Brand-new blank document.
     doc = await PDFDocument.create();
     originalBytes = await doc.save();
   }
@@ -46,87 +62,53 @@ export async function exportPdf(
   onProgress?.({ phase: 'pages' });
   await applyPages(doc, pages, originalBytes);
 
-  onProgress?.({ phase: 'engine' });
-  // Step 1: text-block edits whose engine has NOT yet destroyed their
-  // original page text object. Both `mupdf` and `pdfium` sources have
-  // already been written back into store.pdfBytes at commit time, so
-  // we skip them here. Only `pdflib-overlay` (or future un-committed
-  // blocks) needs a final round-trip through the engine.
-  const pendingTextBlocks = overlays.filter(
+  // Step 1: 对已编辑/移动的 text-block 统一应用(字符级白底 + 重画新字)。
+  // 未编辑且未移动的 text-block 原字已在 PDF 里,不需要处理。
+  onProgress?.({ phase: 'textedits' });
+  const editedTextBlocks = overlays.filter(
     (o): o is TextBlockItem =>
       o.type === 'text-block' &&
-      o.text !== o.originalText &&
-      o.source !== 'pdfium' &&
-      o.source !== 'mupdf'
+      (o.text !== o.originalText ||
+        o.bbox.x !== o.originalBbox.x ||
+        o.bbox.y !== o.originalBbox.y ||
+        o.bbox.w !== o.originalBbox.w ||
+        o.bbox.h !== o.originalBbox.h)
   );
-  if (pendingTextBlocks.length > 0) {
-    const engine = getCachedEngine() ?? (await ensureEngine('edit'));
-    if (engine) {
-      for (const b of pendingTextBlocks) {
-        const pageIndex = pages.findIndex((p) => p.id === b.pageId);
-        if (pageIndex < 0) continue;
-        try {
-          const result = await engine.writeTextBlock({
-            pageIndex,
-            blockId: b.id,
-            newText: b.text,
-            block: {
-              id: b.id,
-              bbox: b.bbox,
-              text: b.originalText,
-              font: b.font,
-              fontSize: b.fontSize,
-              color: b.color,
-            },
-            pdfBytes: originalBytes,
-          });
-          originalBytes = result.bytes;
-        } catch (err) {
-          console.warn(
-            `[exportPdf] engine writeTextBlock failed for ${b.id}; falling back to overlay repaint:`,
-            err
-          );
-        }
-      }
-      doc = await PDFDocument.load(originalBytes);
+  if (editedTextBlocks.length > 0) {
+    // 预加载 CJK 字体:如果有编辑过的 text-block 含中文,需要 CJK 字体。
+    // 重构后编辑不再调引擎,CDN 字体不会在编辑时被预缓存,所以这里显式
+    // 预加载。如果全部 CDN 不可达,loadCjkFontBytes 返回 null,中文会降级
+    // 为 '?'(而非空白)。
+    const hasCjk = editedTextBlocks.some((b) =>
+      b.text.split('').some((ch) => (ch.codePointAt(0) ?? 0) > 0x7e)
+    );
+    if (hasCjk) {
+      await loadCjkFontBytes();
     }
+    await applyTextBlockEdits({
+      doc,
+      originalBytes,
+      pages,
+      textBlocks: editedTextBlocks,
+    });
   }
 
-  // Step 2: form-field values are written into the AcroForm (if any).
+  // Step 2: 非 text-block / 非 form-field 的 overlay -> flatten。
+  // (text-block 已由 applyTextBlockEdits 处理,form-field 由下一步处理)
+  onProgress?.({ phase: 'flatten' });
+  const flattenList = overlays.filter(
+    (o) => o.type !== 'form-field'
+  );
+  await flattenOverlays(doc, flattenList, pages);
+
+  // Step 3: 表单字段 -> 用 pdf-lib form API 重建 AcroForm。
+  onProgress?.({ phase: 'forms' });
   const formFields = overlays.filter(
     (o): o is FormFieldItem => o.type === 'form-field'
   );
   if (formFields.length > 0) {
-    const engine = getCachedEngine() ?? (await ensureEngine('edit'));
-    if (engine) {
-      try {
-        const result = await engine.writeFormFields({
-          pdfBytes: originalBytes,
-          values: formFields.map((f) => ({
-            id: f.id,
-            pageIndex: pages.findIndex((p) => p.id === f.pageId),
-            fieldName: f.fieldName,
-            kind: f.kind,
-            bbox: f.bbox,
-            value: f.value,
-            options: f.options,
-          })),
-        });
-        originalBytes = result.bytes;
-        doc = await PDFDocument.load(originalBytes);
-      } catch (err) {
-        console.warn('[exportPdf] writeFormFields failed:', err);
-      }
-    }
+    await createFormFields(doc, pages, formFields);
   }
-
-  onProgress?.({ phase: 'flatten' });
-  // text-block overlays are now drawn here: their original PDF objects
-  // were destroyed upstream (pdfium) or covered here (pdflib-overlay),
-  // and we just paint the new text at the same baseline.
-  // form-field overlays still go through the engine (AcroForm writes).
-  const flattenList = overlays.filter((o) => o.type !== 'form-field');
-  await flattenOverlays(doc, flattenList, pages);
 
   onProgress?.({ phase: 'save' });
   const bytes = await doc.save();

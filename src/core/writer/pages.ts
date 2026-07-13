@@ -17,6 +17,13 @@ export async function applyPages(
   const source = await PDFDocument.load(originalBytes);
   const sourcePageCount = source.getPageCount();
 
+  // 清空 doc 的现有页面:exportPdf 用 load(originalBytes) 创建 doc,
+  // 已经含 N 页原始页面。不清空的话 addPages 后变 2N 页(前 N 编辑
+  // + 后 N 原始重复),导出的 PDF 页面翻倍。
+  while (doc.getPageCount() > 0) {
+    doc.removePage(0);
+  }
+
   for (let i = 0; i < pages.length; i += 1) {
     const meta = pages[i];
     let target: PDFPage;

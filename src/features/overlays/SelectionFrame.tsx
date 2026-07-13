@@ -89,6 +89,7 @@ export interface SelectionFrameProps {
 export function SelectionFrame({ overlay, zoom }: SelectionFrameProps) {
   const updateOverlay = useDocumentStore((s) => s.updateOverlay);
   const setSelectedOverlayId = useEditorStore((s) => s.setSelectedOverlayId);
+  const tool = useEditorStore((s) => s.tool);
 
   const startRef = useRef<{
     box: { x: number; y: number; w: number; h: number };
@@ -189,6 +190,7 @@ export function SelectionFrame({ overlay, zoom }: SelectionFrameProps) {
   return (
     <g
       transform={transform}
+      pointerEvents="all"
       onPointerDown={(e) => {
         e.stopPropagation();
         setSelectedOverlayId(overlay.id);
@@ -199,15 +201,16 @@ export function SelectionFrame({ overlay, zoom }: SelectionFrameProps) {
         y={box.y}
         width={box.w}
         height={box.h}
-        fill="none"
+        fill="rgba(37,99,235,0.06)"
         stroke="#2563eb"
         strokeWidth={1 / zoom}
         strokeDasharray={`${4 / zoom} ${3 / zoom}`}
-        pointerEvents="stroke"
+        pointerEvents="all"
         onPointerDown={(e) => beginDrag(e, 'move')}
         onPointerMove={onMove}
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
+        style={{ cursor: tool === 'select' ? 'move' : 'default' }}
       />
       {HANDLES.map((h) => {
         const hx =

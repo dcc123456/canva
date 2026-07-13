@@ -17,7 +17,6 @@ import type {
   PageMeta,
   Rect,
   StickyNoteItem,
-  TextBlockItem,
   TextItem,
 } from '../types';
 import { hexToRgb, pickStandardFont } from './helpers';
@@ -72,7 +71,8 @@ export async function flattenOverlays(
         break;
       }
       case 'text-block': {
-        await drawTextBlock(page, overlay, meta, pageHeight, getFont);
+        // text-block 由 applyTextBlockEdits 统一处理(已编辑的白底+重画,
+        // 未编辑的原字已在 PDF 里)。flatten 阶段跳过。
         break;
       }
       case 'form-field': {
@@ -168,57 +168,6 @@ async function drawTextItem(
     font,
     color: rgb(r, g, b),
     rotate: item.rotation !== 0 ? degrees(item.rotation) : undefined,
-  });
-}
-
-async function drawTextBlock(
-  page: PDFPage,
-  item: TextBlockItem,
-  meta: PageMeta,
-  pageHeight: number,
-  getFont: (name: StandardFonts) => Promise<PDFFont>
-): Promise<void> {
-  // Three sources:
-  //   • mupdf           – MuPDF.js has already used Redact +
-  //                       applyRedactions to wipe the original bytes
-  //                       from the page content stream. The saved PDF
-  //                       no longer contains the original glyphs at
-  //                       all, so we just repaint the new text at the
-  //                       same baseline, no white box.
-  //   • pdfium          – the engine has already destroyed the original
-  //                       page text object in the saved PDF; we just
-  //                       repaint the new text at the original baseline,
-  //                       no white box.
-  //   • pdflib-overlay  – last-resort fallback: original stream byte is
-  //                       still present, so we paint a white rectangle
-  //                       first to obliterate the original glyphs
-  //                       (best-effort, rounded font widths can leak).
-  const r: Rect = item.bbox;
-  const fontName = pickStandardFont(item.font, false, false);
-  const font = await getFont(fontName);
-  const size = item.fontSize;
-  const baseline = pageHeight - r.y - size;
-  const { r: rr, g: gg, b: bb } = hexToRgb(item.color);
-
-  if (item.source === 'pdflib-overlay') {
-    // White-out the original glyph region before drawing the new one.
-    page.drawRectangle({
-      x: r.x,
-      y: pageHeight - r.y - r.h,
-      width: r.w,
-      height: r.h,
-      color: rgb(1, 1, 1),
-      opacity: 1,
-    });
-  }
-
-  page.drawText(item.text, {
-    x: r.x,
-    y: baseline,
-    size,
-    font,
-    color: rgb(rr, gg, bb),
-    rotate: meta.rotation !== 0 ? degrees(meta.rotation) : undefined,
   });
 }
 

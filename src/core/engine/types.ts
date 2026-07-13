@@ -1,19 +1,12 @@
-// Engine abstraction: a common interface for "edit" operations
-// (text-block detection, text-block write, form-field parse, form-field write).
+// Engine abstraction: a common interface for text-block detection and
+// form-field parsing.
 //
-// Three engines implement this interface:
-//   * `mupdf`         – uses the official Artifex `mupdf` npm package
-//                        (MuPDF.js WebAssembly). This is the *preferred*
-//                        engine for text editing: `Redact +
-//                        applyRedactions` does true byte-level deletion of
-//                        the original glyphs in the content stream.
-//   * `pdfium`        – legacy WebAssembly path via @embedpdf/pdfium. Used
-//                        as a backup if MuPDF.js fails to load.
-//   * `pdflib-overlay`– pdfjs + pdf-lib fallback. White-out the area, then
-//                        redraw new text on top. Non byte-level.
+// 重构后引擎只保留"只读"能力(detect/parse)。文本编辑不再在编辑时
+// 调引擎 -- 编辑只改 overlay,导出时统一应用。表单字段导出时用
+// pdf-lib form API 重建,不再调引擎 writeFormFields。
 //
-// The router (`core/engine/router.ts`) returns the best available one in
-// the priority order: mupdf > pdfium > pdflib-overlay.
+// 引擎路由(core/engine/router.ts)仍按 mupdf > pdfium > pdflib-overlay
+// 优先级选择,用于 detectTextBlocks / parseFormFields。
 import type { Rect } from '../types';
 
 export type EngineKind = 'mupdf' | 'pdflib-overlay' | 'pdfium';
@@ -44,18 +37,6 @@ export interface FormField {
   options?: string[];
 }
 
-export interface WriteTextBlockResult {
-  /** New PDF bytes after writing. */
-  bytes: Uint8Array;
-  /** Which engine actually produced the bytes. */
-  source: EngineKind;
-}
-
-export interface WriteFormFieldsResult {
-  bytes: Uint8Array;
-  source: EngineKind;
-}
-
 export interface DetectTextBlocksOptions {
   /** Optional current page index; some engines can be page-aware. */
   pageIndex: number;
@@ -67,20 +48,6 @@ export interface ParseFormFieldsOptions {
   pdfBytes: Uint8Array;
 }
 
-export interface WriteTextBlockOptions {
-  pageIndex: number;
-  blockId: string;
-  newText: string;
-  /** The original text-block, used by the fallback to know bbox/font/etc. */
-  block: TextBlock;
-  pdfBytes: Uint8Array;
-}
-
-export interface WriteFormFieldsOptions {
-  pdfBytes: Uint8Array;
-  values: FormField[];
-}
-
 export interface EngineInterface {
   /** Identifier of the engine implementation. */
   readonly kind: EngineKind;
@@ -90,12 +57,6 @@ export interface EngineInterface {
     options: DetectTextBlocksOptions
   ): Promise<TextBlock[]>;
 
-  /** Replace the text of a single detected block. */
-  writeTextBlock(options: WriteTextBlockOptions): Promise<WriteTextBlockResult>;
-
   /** Parse all AcroForm fields across the document. */
   parseFormFields(options: ParseFormFieldsOptions): Promise<FormField[]>;
-
-  /** Write all form fields with their new values. */
-  writeFormFields(options: WriteFormFieldsOptions): Promise<WriteFormFieldsResult>;
 }

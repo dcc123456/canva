@@ -54,18 +54,9 @@ function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  // 当 store.pdfBytes 被引擎(MuPDF / PDFium / 兜底)写回时,我们需要
-  // 让 pdfjs 拿到的 PDFDocumentProxy 与字节流同步。两个触发口径:
-  //   * commit 时显式 dispatch `canva:pdf-bytes-replaced`,这里清掉 doc;
-  //   * 这个 effect 注意到 doc===null && store.pdfBytes!==null 时
-  //     自动 loadDocument 重建 doc。
-  // 没有这层同步,画布会一直显示创建 doc 时的快照,看起来"页面没变"。
-  useEffect(() => {
-    const handler = () => setDoc(null);
-    window.addEventListener('canva:pdf-bytes-replaced', handler);
-    return () => window.removeEventListener('canva:pdf-bytes-replaced', handler);
-  }, []);
-
+  // 当模板/项目加载后 setDoc(null) 时,这个 effect 注意到 doc===null &&
+  // store.pdfBytes!==null,自动 loadDocument 重建 pdfjs 文档。
+  // (文本编辑不再改 pdfBytes,所以这里只服务模板/项目加载场景。)
   useEffect(() => {
     if (doc !== null) return;
     const bytes = useDocumentStore.getState().pdfBytes;

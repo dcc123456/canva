@@ -116,7 +116,16 @@ async function applyToStores(
     opts.onPdfJsDoc?.(null);
     setTotalPages(file.pages.length);
   }
-  setOverlays(file.overlays);
+  setOverlays(
+    // 旧存档的 text-block 可能没有 originalBbox 字段(重构前只有 bbox)。
+    // 迁移:用 bbox 填充 originalBbox,这样"是否被编辑"判断能正常工作。
+    file.overlays.map((o) => {
+      if (o.type === 'text-block' && !(o as { originalBbox?: unknown }).originalBbox) {
+        return { ...o, originalBbox: { ...o.bbox } };
+      }
+      return o;
+    })
+  );
   setPdfName(filename.replace(/\.minipdf\.json$/i, ''));
   setCurrentPage(0);
   clearHistory();
