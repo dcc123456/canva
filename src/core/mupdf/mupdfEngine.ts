@@ -65,57 +65,125 @@ function detectTextBlocksImpl(
         baseline: number;
         font: string;
         size: number;
+        bold: boolean;
+        italic: boolean;
       }
       const atoms: AtomLine[] = [];
       for (const block of json.blocks) {
         if (block.type !== 'text' || !block.lines) continue;
         for (const line of block.lines) {
-          // 清掉 mupdf 在 span 末尾插的 \n / 控制字符。
           const text = (line.text ?? '')
             .replace(/[\r\n\t\v\f]+/g, '')
             .trim();
           if (!text) continue;
           const baseline = (line.y ?? line.bbox.y + line.bbox.h) | 0;
+          const fi = line.font;
+          const fName = (fi?.name ?? fi?.family ?? 'embedded');
+          const fLower = fName.toLowerCase();
+          const wLower = (fi?.weight ?? '').toLowerCase();
+          const sLower = (fi?.style ?? '').toLowerCase();
           atoms.push({
             bbox: { ...line.bbox },
             text,
             baseline,
-            font: line.font?.name ?? line.font?.family ?? 'embedded',
-            size: line.font?.size || line.bbox.h || 12,
+            font: fName,
+            size: fi?.size || line.bbox.h || 12,
+            bold: fLower.includes('bold') || wLower.includes('bold') || wLower === '700',
+            italic: fLower.includes('italic') || fLower.includes('oblique') || sLower.includes('italic') || sLower.includes('oblique'),
           });
         }
       }
       // 按 baseline 聚类:同行 span (baseline 差 < 字号/2) 拼到一起,
       // 组内按 x 排序,得到"一行一个 block"的语义。
       atoms.sort((a, b) => a.baseline - b.baseline || a.bbox.x - b.bbox.x);
-      interface Cluster {
+      interface Line {
         baseline: number;
-        lines: AtomLine[];
+        atoms: AtomLine[];
+        text: string;
+        x: number;
+        w: number;
+        y: number;
+        h: number;
+        size: number;
+        font: string;
+        bold: boolean;
+        italic: boolean;
       }
-      const clusters: Cluster[] = [];
+      const lines: Line[] = [];
       for (const atom of atoms) {
         const tol = Math.max(2, atom.size * 0.5);
-        const last = clusters[clusters.length - 1];
+        const last = lines[lines.length - 1];
         if (last && Math.abs(last.baseline - atom.baseline) <= tol) {
-          last.lines.push(atom);
+          last.atoms.push(atom);
         } else {
-          clusters.push({ baseline: atom.baseline, lines: [atom] });
+          lines.push({
+            baseline: atom.baseline,
+            atoms: [atom],
+            text: '',
+            x: atom.bbox.x,
+            w: atom.bbox.w,
+            y: atom.bbox.y,
+            h: atom.bbox.h,
+            size: atom.size,
+            font: atom.font,
+            bold: atom.bold,
+            italic: atom.italic,
+          });
         }
       }
+      for (const line of lines) {
+        line.atoms.sort((a, b) => a.bbox.x - b.bbox.x);
+        line.text = line.atoms.map((a) => a.text).join('').trim();
+        line.x = Math.min(...line.atoms.map((a) => a.bbox.x));
+        const maxR = Math.max(...line.atoms.map((a) => a.bbox.x + a.bbox.w));
+        line.w = maxR - line.x;
+        line.y = Math.min(...line.atoms.map((a) => a.bbox.y));
+        const maxB = Math.max(...line.atoms.map((a) => a.bbox.y + a.bbox.h));
+        line.h = maxB - line.y;
+        line.size = line.atoms[0].size;
+        line.font = line.atoms[0].font;
+        line.bold = line.atoms[0].bold;
+        line.italic = line.atoms[0].italic;
+      }
+      // 按段落聚类:相邻行(x 范围重叠 + 行间距合理 + 字号相近)合并
+      interface Paragraph { lines: Line[] }
+      const paragraphs: Paragraph[] = [];
+      for (const line of lines) {
+        if (!line.text) continue;
+        const last = paragraphs[paragraphs.length - 1];
+        if (last) {
+          const prev = last.lines[last.lines.length - 1];
+          const baselineDiff = line.baseline - prev.baseline;
+          const minSize = Math.min(prev.size, line.size);
+          const maxSize = Math.max(prev.size, line.size);
+          const xOverlap = line.x < prev.x + prev.w && line.x + line.w > prev.x;
+          const spacingOk = baselineDiff >= minSize * 0.8 && baselineDiff <= maxSize * 3.0;
+          const sizeOk = maxSize / minSize <= 1.3;
+          if (xOverlap && spacingOk && sizeOk) {
+            last.lines.push(line);
+            continue;
+          }
+        }
+        paragraphs.push({ lines: [line] });
+      }
       const blocks: TextBlock[] = [];
-      clusters.forEach((cluster, idx) => {
-        cluster.lines.sort((a, b) => a.bbox.x - b.bbox.x);
-        const text = cluster.lines.map((l) => l.text).join('').trim();
+      paragraphs.forEach((para, idx) => {
+        const text = para.lines.map((l) => l.text).join('\n').trim();
         if (!text) return;
-        const minX = Math.min(...cluster.lines.map((l) => l.bbox.x));
-        const minY = Math.min(...cluster.lines.map((l) => l.bbox.y));
-        const maxRight = Math.max(
-          ...cluster.lines.map((l) => l.bbox.x + l.bbox.w)
-        );
-        const maxBottom = Math.max(
-          ...cluster.lines.map((l) => l.bbox.y + l.bbox.h)
-        );
-        const head = cluster.lines[0];
+        const minX = Math.min(...para.lines.map((l) => l.x));
+        const minY = Math.min(...para.lines.map((l) => l.y));
+        const maxRight = Math.max(...para.lines.map((l) => l.x + l.w));
+        const maxBottom = Math.max(...para.lines.map((l) => l.y + l.h));
+        const head = para.lines[0];
+        let lineHeight = 1.2;
+        if (para.lines.length > 1) {
+          const diffs: number[] = [];
+          for (let i = 1; i < para.lines.length; i++) {
+            diffs.push(para.lines[i].baseline - para.lines[i - 1].baseline);
+          }
+          const avgDiff = diffs.reduce((a, b) => a + b, 0) / diffs.length;
+          lineHeight = avgDiff / head.size;
+        }
         blocks.push({
           id: `tb-${pageIndex}-${idx}`,
           bbox: {
@@ -128,6 +196,9 @@ function detectTextBlocksImpl(
           font: head.font,
           fontSize: head.size,
           color: '#000000',
+          lineHeight: Math.max(0.5, Math.round(lineHeight * 100) / 100),
+          bold: head.bold,
+          italic: head.italic,
         });
       });
       return blocks;

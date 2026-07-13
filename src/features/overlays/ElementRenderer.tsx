@@ -145,19 +145,27 @@ export function ElementRenderer({ overlay, selected = false }: ElementRendererPr
             strokeDasharray="3 2"
             pointerEvents="none"
           />
-          {/* 新字画在 bbox(当前位置) */}
-          {showOverlay && (
-            <text
-              x={overlay.bbox.x}
-              y={overlay.bbox.y + overlay.fontSize}
-              fontSize={overlay.fontSize}
-              fontFamily={overlay.font}
-              fill={overlay.color}
-              pointerEvents="none"
-            >
-              {overlay.text}
-            </text>
-          )}
+          {/* 新字画在 bbox(当前位置),多行按 lineHeight 间距 */}
+          {showOverlay &&
+            overlay.text.split('\n').map((line, i) => (
+              <text
+                key={i}
+                x={overlay.bbox.x}
+                y={
+                  overlay.bbox.y +
+                  overlay.fontSize +
+                  i * overlay.fontSize * (overlay.lineHeight || 1.2)
+                }
+                fontSize={overlay.fontSize}
+                fontFamily={overlay.font}
+                fontWeight={overlay.bold ? 700 : 400}
+                fontStyle={overlay.italic ? 'italic' : 'normal'}
+                fill={overlay.color}
+                pointerEvents="none"
+              >
+                {line}
+              </text>
+            ))}
         </>
       );
     }

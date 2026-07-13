@@ -402,6 +402,23 @@ function TextControls({
             className="rounded border px-1 py-0.5"
           />
         </label>
+
+        <div className="flex items-center gap-1">
+          <ToggleButton
+            active={!!item.bold}
+            onClick={() => updateOverlay(item.id, { bold: !item.bold } as Partial<OverlayItem>)}
+            title="粗体"
+          >
+            <b>B</b>
+          </ToggleButton>
+          <ToggleButton
+            active={!!item.italic}
+            onClick={() => updateOverlay(item.id, { italic: !item.italic } as Partial<OverlayItem>)}
+            title="斜体"
+          >
+            <i>I</i>
+          </ToggleButton>
+        </div>
       </div>
     </div>
   );
@@ -653,6 +670,26 @@ function TextBlockControls({
               updateOverlay(item.id, { color: e.target.value } as Partial<OverlayItem>)
             }
             className="h-7 w-10 cursor-pointer border-0 bg-transparent p-0"
+          />
+        </label>
+
+        <label className="flex flex-col gap-1 text-xs text-gray-600">
+          行距
+          <input
+            type="number"
+            min={0.5}
+            max={5}
+            step={0.05}
+            value={item.lineHeight ?? 1.2}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v)) {
+                updateOverlay(item.id, {
+                  lineHeight: Math.max(0.5, Math.min(5, v)),
+                } as Partial<OverlayItem>);
+              }
+            }}
+            className="rounded border px-1 py-0.5"
           />
         </label>
       </div>

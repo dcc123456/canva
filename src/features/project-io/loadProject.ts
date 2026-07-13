@@ -117,13 +117,23 @@ async function applyToStores(
     setTotalPages(file.pages.length);
   }
   setOverlays(
-    // 旧存档的 text-block 可能没有 originalBbox 字段(重构前只有 bbox)。
-    // 迁移:用 bbox 填充 originalBbox,这样"是否被编辑"判断能正常工作。
+    // 旧存档迁移:text-block 可能缺 originalBbox / lineHeight / bold / italic 字段。
     file.overlays.map((o) => {
-      if (o.type === 'text-block' && !(o as { originalBbox?: unknown }).originalBbox) {
-        return { ...o, originalBbox: { ...o.bbox } };
+      if (o.type !== 'text-block') return o;
+      const patch: Record<string, unknown> = {};
+      if (!(o as { originalBbox?: unknown }).originalBbox) {
+        patch.originalBbox = { ...o.bbox };
       }
-      return o;
+      if ((o as { lineHeight?: number }).lineHeight === undefined) {
+        patch.lineHeight = 1.2;
+      }
+      if ((o as { bold?: boolean }).bold === undefined) {
+        patch.bold = false;
+      }
+      if ((o as { italic?: boolean }).italic === undefined) {
+        patch.italic = false;
+      }
+      return Object.keys(patch).length > 0 ? { ...o, ...patch } : o;
     })
   );
   setPdfName(filename.replace(/\.minipdf\.json$/i, ''));

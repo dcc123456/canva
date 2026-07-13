@@ -44,7 +44,7 @@ export async function applyTextBlockEdits(
   let cjkFont: PDFFont | null = null;
   let cjkFontAttempted = false;
 
-  async function getFont(text: string): Promise<{ font: PDFFont; safe: string }> {
+  async function getFont(text: string, bold: boolean, italic: boolean): Promise<{ font: PDFFont; safe: string }> {
     const needsCjk = containsNonAscii(text);
     if (needsCjk) {
       if (!cjkFontAttempted) {
@@ -52,16 +52,13 @@ export async function applyTextBlockEdits(
         doc.registerFontkit(fontkit);
         const bytes = await loadCjkFontBytes();
         if (bytes) {
-          // subset: false -- 嵌入完整字体。subset: true 在 save 时可能
-          // 没有正确包含使用到的中文字符,导致 PDF 阅读器看到空字体。
           cjkFont = await doc.embedFont(bytes, { subset: false });
         }
       }
       if (cjkFont) {
         return { font: cjkFont, safe: text };
       }
-      // CJK 字体不可用 -- 降级为 ASCII,非 ASCII 字符替换为 '?'。
-      const fallbackName = pickStandardFont('Helvetica', false, false);
+      const fallbackName = pickStandardFont('Helvetica', bold, italic);
       let f = fontCache.get(fallbackName);
       if (!f) {
         f = await doc.embedFont(fallbackName);
@@ -73,8 +70,7 @@ export async function applyTextBlockEdits(
       }
       return { font: f, safe };
     }
-    // 纯 ASCII:用 StandardFonts。
-    const name = pickStandardFont('Helvetica', false, false);
+    const name = pickStandardFont('Helvetica', bold, italic);
     let f = fontCache.get(name);
     if (!f) {
       f = await doc.embedFont(name);
@@ -127,22 +123,27 @@ export async function applyTextBlockEdits(
       });
     }
 
-    // (3) 画新字。baseline 锚在 bbox 底部。
+    // (3) 画新字。多行按 lineHeight 间距分别 drawText。
     if (!block.text) continue;
-    const { font, safe } = await getFont(block.text);
-    const baseline = pageHeight - block.bbox.y - fontSize;
+    const { font, safe } = await getFont(block.text, block.bold, block.italic);
+    const lineStep = fontSize * (block.lineHeight || 1.2);
+    const drawAllLines = (f: PDFFont, text: string) => {
+      const textLines = text.split('\n');
+      for (let li = 0; li < textLines.length; li++) {
+        const y = pageHeight - block.bbox.y - fontSize - li * lineStep;
+        page.drawText(textLines[li], {
+          x: block.bbox.x,
+          y,
+          size: fontSize,
+          font: f,
+          color: rgb(r, g, b),
+          maxWidth: block.bbox.w,
+        });
+      }
+    };
     try {
-      page.drawText(safe, {
-        x: block.bbox.x,
-        y: baseline,
-        size: fontSize,
-        font,
-        color: rgb(r, g, b),
-        maxWidth: block.bbox.w,
-      });
+      drawAllLines(font, safe);
     } catch (err) {
-      // drawText 失败通常是字体不支持某码位。用 '?' 替换非 ASCII
-      // 字符后用 Helvetica 兜底重试,避免文字完全空白。
       // eslint-disable-next-line no-console
       console.warn(
         '[textBlockEdits] drawText 失败,用 ? 兜底重试 block %s:',
@@ -160,14 +161,7 @@ export async function applyTextBlockEdits(
         for (const ch of safe) {
           safeAscii += (ch.codePointAt(0) ?? 0) > 0x7e ? '?' : ch;
         }
-        page.drawText(safeAscii, {
-          x: block.bbox.x,
-          y: baseline,
-          size: fontSize,
-          font: fb,
-          color: rgb(r, g, b),
-          maxWidth: block.bbox.w,
-        });
+        drawAllLines(fb, safeAscii);
       } catch (err2) {
         // eslint-disable-next-line no-console
         console.error(

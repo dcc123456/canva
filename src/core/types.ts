@@ -96,6 +96,9 @@ export interface TextBlockItem extends OverlayBase {
   font: string;
   fontSize: number;
   color: string;
+  lineHeight: number;
+  bold: boolean;
+  italic: boolean;
 }
 
 // F11

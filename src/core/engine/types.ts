@@ -18,6 +18,9 @@ export interface TextBlock {
   font: string;
   fontSize: number;
   color: string;
+  lineHeight: number;
+  bold: boolean;
+  italic: boolean;
 }
 
 export type FormFieldKind =

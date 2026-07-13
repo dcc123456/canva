@@ -155,6 +155,9 @@ export function Toolbar({
               font: b.font,
               fontSize: b.fontSize,
               color: b.color,
+              lineHeight: b.lineHeight,
+              bold: b.bold,
+              italic: b.italic,
             });
           }
         }

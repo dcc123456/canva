@@ -166,8 +166,16 @@ export function TextBlockEditLayer({ page }: TextBlockEditLayerProps) {
                 // don't restart the same edit on mouseup.
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => e.stopPropagation()}
-                className="h-full w-full resize-none border-0 bg-white/95 p-1 text-xs text-gray-900 outline-none ring-0 focus:bg-white"
-                style={{ fontSize: Math.max(8, b.bbox.h * zoom * 0.7) }}
+                className="h-full w-full resize-none border-0 bg-white outline-none ring-0 focus:bg-white overflow-hidden"
+                style={{
+                  fontSize: Math.max(8, b.fontSize * zoom),
+                  lineHeight: String(b.lineHeight || 1.2),
+                  fontFamily: b.font,
+                  fontWeight: b.bold ? 700 : 400,
+                  fontStyle: b.italic ? 'italic' : 'normal',
+                  color: b.color || '#000000',
+                  padding: 0,
+                }}
               />
             ) : null}
             {!isEditing && (

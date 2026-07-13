@@ -99,26 +99,85 @@ async function detectTextBlocksImpl(
   const tc = await page.getTextContent();
   const items = (tc.items as unknown[]).filter(isTextItem);
   const lines = clusterIntoLines(items);
-  const blocks: TextBlock[] = lines
-    .map((line, i) => {
-      const { rect, fontSize, fontName } = rectOfLine(viewport.height, line.items);
-      const text = line.items
-        .sort((a, b) => a.transform[4] - b.transform[4])
-        .map((it) => it.str)
-        .join(' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-      if (!text) return null;
-      return {
-        id: `tb-${opts.pageIndex}-${i}`,
-        bbox: rect,
-        text,
-        font: fontName,
-        fontSize,
-        color: '#000000',
-      } satisfies TextBlock;
-    })
-    .filter((b): b is TextBlock => !!b);
+  // 每行的完整信息(baseline + bbox + fontSize + text)
+  interface LineInfo {
+    baseline: number;
+    rect: Rect;
+    fontSize: number;
+    fontName: string;
+    text: string;
+  }
+  const lineInfos: LineInfo[] = [];
+  for (const line of lines) {
+    const { rect, fontSize, fontName } = rectOfLine(viewport.height, line.items);
+    const text = line.items
+      .sort((a, b) => a.transform[4] - b.transform[4])
+      .map((it) => it.str)
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!text) continue;
+    lineInfos.push({
+      baseline: line.y,
+      rect,
+      fontSize,
+      fontName,
+      text,
+    });
+  }
+  // 按段落聚类:相邻行(x 范围重叠 + 行间距合理 + 字号相近)合并
+  interface Paragraph { lines: LineInfo[] }
+  const paragraphs: Paragraph[] = [];
+  for (const li of lineInfos) {
+    const last = paragraphs[paragraphs.length - 1];
+    if (last) {
+      const prev = last.lines[last.lines.length - 1];
+      const baselineDiff = li.baseline - prev.baseline;
+      const minSize = Math.min(prev.fontSize, li.fontSize);
+      const maxSize = Math.max(prev.fontSize, li.fontSize);
+      const xOverlap = li.rect.x < prev.rect.x + prev.rect.w && li.rect.x + li.rect.w > prev.rect.x;
+      const spacingOk = baselineDiff >= minSize * 0.8 && baselineDiff <= maxSize * 3.0;
+      const sizeOk = maxSize / minSize <= 1.3;
+      if (xOverlap && spacingOk && sizeOk) {
+        last.lines.push(li);
+        continue;
+      }
+    }
+    paragraphs.push({ lines: [li] });
+  }
+  const blocks: TextBlock[] = paragraphs.map((para, i) => {
+    const text = para.lines.map((l) => l.text).join('\n').trim();
+    const minX = Math.min(...para.lines.map((l) => l.rect.x));
+    const minY = Math.min(...para.lines.map((l) => l.rect.y));
+    const maxRight = Math.max(...para.lines.map((l) => l.rect.x + l.rect.w));
+    const maxBottom = Math.max(...para.lines.map((l) => l.rect.y + l.rect.h));
+    const head = para.lines[0];
+    let lineHeight = 1.2;
+    if (para.lines.length > 1) {
+      const diffs: number[] = [];
+      for (let j = 1; j < para.lines.length; j++) {
+        diffs.push(para.lines[j].baseline - para.lines[j - 1].baseline);
+      }
+      const avgDiff = diffs.reduce((a, b) => a + b, 0) / diffs.length;
+      lineHeight = avgDiff / head.fontSize;
+    }
+    return {
+      id: `tb-${opts.pageIndex}-${i}`,
+      bbox: {
+        x: minX,
+        y: minY,
+        w: Math.max(1, maxRight - minX),
+        h: Math.max(1, maxBottom - minY),
+      },
+      text,
+      font: head.fontName,
+      fontSize: head.fontSize,
+      color: '#000000',
+      lineHeight: Math.max(0.5, Math.round(lineHeight * 100) / 100),
+      bold: /bold/i.test(head.fontName),
+      italic: /italic|oblique/i.test(head.fontName),
+    } satisfies TextBlock;
+  });
   page.cleanup();
   return blocks;
 }

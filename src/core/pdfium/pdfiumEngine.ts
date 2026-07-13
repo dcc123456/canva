@@ -137,6 +137,9 @@ async function detectTextBlocksImpl(
         font: 'embedded',
         fontSize,
         color: '#000000',
+        lineHeight: 1.2,
+        bold: false,
+        italic: false,
       });
     }
     return blocks;
