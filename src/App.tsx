@@ -3,7 +3,9 @@ import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { v4 as uuidv4 } from 'uuid';
 import { Viewer } from './features/viewer/Viewer';
 import { Sidebar } from './features/viewer/Sidebar';
-import { Toolbar } from './components/Toolbar';
+import { TopBar } from './components/TopBar';
+import { ToolSidebar } from './components/ToolSidebar';
+import { BottomBar } from './components/BottomBar';
 import { Inspector } from './components/Inspector';
 import { SignatureDialog } from './components/SignatureDialog';
 import { TemplateGallery } from './features/templates/TemplateGallery';
@@ -12,7 +14,6 @@ import { Toaster } from './components/Toaster';
 import { ShortcutsModal } from './components/ShortcutsModal';
 import { EmptyState } from './components/EmptyState';
 import { pdfjsLib } from './core/pdf/loader';
-import { applyTheme, getStoredTheme, type Theme } from './utils/theme';
 import { useDocumentStore } from './store/documentStore';
 import { useEditorStore } from './store/editorStore';
 import { useTemplateStore } from './store/templateStore';
@@ -23,13 +24,9 @@ import { toast } from './utils/toast';
 
 function App() {
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const [signatureOpen, setSignatureOpen] = useState(false);
   const [templatesOpen, setTemplatesOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
-  const [progress, setProgress] = useState<{ loaded: number; total: number } | null>(null);
-  const [theme, setTheme] = useState<Theme>(() => getStoredTheme());
 
   // Touch all stores so they are constructed on app load.
   useDocumentStore.getState();
@@ -54,9 +51,8 @@ function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  // 当模板/项目加载后 setDoc(null) 时,这个 effect 注意到 doc===null &&
-  // store.pdfBytes!==null,自动 loadDocument 重建 pdfjs 文档。
-  // (文本编辑不再改 pdfBytes,所以这里只服务模板/项目加载场景。)
+  // When template/project load sets doc=null, this effect notices
+  // doc===null && store.pdfBytes!==null and auto-reloads the pdfjs document.
   useEffect(() => {
     if (doc !== null) return;
     const bytes = useDocumentStore.getState().pdfBytes;
@@ -64,8 +60,7 @@ function App() {
     let cancelled = false;
     (async () => {
       try {
-        // pdfjs 在内部会 transfer 这个 buffer;给它一份 clone 避免
-        // 影响 store 里的原始字节(后续仍可能再次写回)。
+        // Clone the buffer: pdfjs transfers (detaches) it internally.
         const task = pdfjsLib.getDocument({ data: new Uint8Array(bytes) });
         const next = await task.promise;
         if (!cancelled) {
@@ -87,17 +82,11 @@ function App() {
   }, [doc]);
 
   async function handleOpenFile(file: File) {
-    setBusy(true);
-    setError(null);
-    setProgress({ loaded: 0, total: 1 });
     try {
       const buffer = await file.arrayBuffer();
       const sharedView = new Uint8Array(buffer);
       const pdfBytes = new Uint8Array(sharedView);
-      const document = await loadDocumentWithProgress(
-        sharedView,
-        (p) => setProgress(p)
-      );
+      const document = await loadDocumentWithProgress(sharedView, () => {});
       const newPages: PageMeta[] = [];
       for (let i = 1; i <= document.numPages; i += 1) {
         const p = await document.getPage(i);
@@ -126,15 +115,11 @@ function App() {
     } catch (err) {
       console.error(err);
       const msg = err instanceof Error ? err.message : String(err);
-      setError(msg);
       toast.error(`打开失败: ${msg}`);
-    } finally {
-      setBusy(false);
-      setProgress(null);
     }
   }
 
-  // Toolbar's "图片" button asks the CanvasInteractionLayer to open its
+  // Toolbar's "image" button asks the CanvasInteractionLayer to open its
   // hidden file input via this window event.
   function pickImage() {
     window.dispatchEvent(new CustomEvent('canva:open-image-picker'));
@@ -142,77 +127,30 @@ function App() {
 
   return (
     <ErrorBoundary>
-      <div className="flex h-screen w-screen flex-col bg-white text-gray-900">
-        <header className="flex items-center justify-between border-b bg-gray-50 px-4 py-2">
-          <div className="text-base font-semibold">Mini PDF 编辑器</div>
-          <div className="text-xs text-gray-500">
-            F2 注释 · F3 文字 · F4 图片 · F5 页面 · F6 画笔/签名 · F12 模板
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setShortcutsOpen(true)}
-              title="查看快捷键 (?)"
-              className="rounded border bg-white px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-100"
-            >
-              ?
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                const next: Theme = theme === 'dark' ? 'light' : 'dark';
-                setTheme(next);
-                applyTheme(next);
-                try {
-                  localStorage.setItem('canva.theme', next);
-                } catch {
-                  /* ignore */
-                }
-              }}
-              title="切换暗色 / 亮色主题"
-              className="rounded border bg-white px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-100"
-            >
-              {theme === 'dark' ? '☀ 亮' : '🌙 暗'}
-            </button>
-          </div>
-          {error && <div className="text-xs text-red-600">{error}</div>}
-          {busy && (
-            <div className="flex items-center gap-2 text-xs text-gray-500">
-              {progress && progress.total > 0 ? (
-                <>
-                  <span>加载中...</span>
-                  <div className="h-1 w-32 overflow-hidden rounded bg-gray-200">
-                    <div
-                      className="h-full bg-blue-500 transition-all"
-                      style={{
-                        width: `${Math.round((progress.loaded / progress.total) * 100)}%`,
-                      }}
-                    />
-                  </div>
-                </>
-              ) : (
-                <span>加载中...</span>
-              )}
-            </div>
-          )}
-        </header>
-        <Toolbar
-          onPickImage={pickImage}
-          onOpenSignature={() => setSignatureOpen(true)}
-          onOpenTemplates={() => setTemplatesOpen(true)}
+      {/* Canva-style partitioned layout: TopBar / [ToolSidebar | Sidebar | Viewer | Inspector] / BottomBar */}
+      <div className="flex h-screen w-screen flex-col bg-gray-100 text-gray-900 dark:bg-gray-900 dark:text-gray-100">
+        <TopBar
+          onOpenFile={handleOpenFile}
           onProjectLoaded={() => {
             // The viewer needs a fresh pdfjs document; clear the existing
             // one so the next render reloads from the current store bytes.
             setDoc(null);
           }}
+          onOpenTemplates={() => setTemplatesOpen(true)}
         />
         <div className="flex flex-1 overflow-hidden">
+          <ToolSidebar
+            onPickImage={pickImage}
+            onOpenSignature={() => setSignatureOpen(true)}
+          />
           <Sidebar doc={doc} />
           <main className="flex-1 overflow-hidden">
             <PdfOrEmpty doc={doc} onOpenFile={handleOpenFile} />
           </main>
           <Inspector />
         </div>
+        <BottomBar />
+        {/* Modals & overlays */}
         <SignatureDialog
           open={signatureOpen}
           onClose={() => setSignatureOpen(false)}
@@ -231,6 +169,7 @@ function App() {
         />
         <Toaster />
         <ShortcutsOpener onOpen={() => setShortcutsOpen(true)} />
+        <TemplatesOpener onOpen={() => setTemplatesOpen(true)} />
         <DocumentReplacedListener
           onReplace={() => {
             setDoc(null);
@@ -261,7 +200,7 @@ function PdfOrEmpty({
       <EmptyState
         onOpenFile={onOpenFile}
         onNewBlank={() => {
-          // Set a single blank A4 page without bytes — Viewer will draw the
+          // Set a single blank A4 page without bytes - Viewer will draw the
           // blank placeholder. This is enough to start typing / drawing.
           useDocumentStore.getState().setPages([
             {
@@ -282,7 +221,7 @@ function PdfOrEmpty({
       />
     );
   }
-  return <Viewer doc={doc} onOpenFile={onOpenFile} />;
+  return <Viewer doc={doc} />;
 }
 
 /**
@@ -293,6 +232,19 @@ function ShortcutsOpener({ onOpen }: { onOpen: () => void }) {
     const handler = () => onOpen();
     window.addEventListener('canva:open-shortcuts', handler);
     return () => window.removeEventListener('canva:open-shortcuts', handler);
+  }, [onOpen]);
+  return null;
+}
+
+/**
+ * Listen for the "open templates" event dispatched by EmptyState's
+ * "从模板开始" button and open the TemplateGallery.
+ */
+function TemplatesOpener({ onOpen }: { onOpen: () => void }) {
+  useEffect(() => {
+    const handler = () => onOpen();
+    window.addEventListener('canva:open-templates', handler);
+    return () => window.removeEventListener('canva:open-templates', handler);
   }, [onOpen]);
   return null;
 }

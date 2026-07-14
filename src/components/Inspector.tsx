@@ -402,23 +402,6 @@ function TextControls({
             className="rounded border px-1 py-0.5"
           />
         </label>
-
-        <div className="flex items-center gap-1">
-          <ToggleButton
-            active={!!item.bold}
-            onClick={() => updateOverlay(item.id, { bold: !item.bold } as Partial<OverlayItem>)}
-            title="粗体"
-          >
-            <b>B</b>
-          </ToggleButton>
-          <ToggleButton
-            active={!!item.italic}
-            onClick={() => updateOverlay(item.id, { italic: !item.italic } as Partial<OverlayItem>)}
-            title="斜体"
-          >
-            <i>I</i>
-          </ToggleButton>
-        </div>
       </div>
     </div>
   );
@@ -692,6 +675,23 @@ function TextBlockControls({
             className="rounded border px-1 py-0.5"
           />
         </label>
+
+        <div className="flex items-center gap-1">
+          <ToggleButton
+            active={!!item.bold}
+            onClick={() => updateOverlay(item.id, { bold: !item.bold } as Partial<OverlayItem>)}
+            title="粗体"
+          >
+            <b>B</b>
+          </ToggleButton>
+          <ToggleButton
+            active={!!item.italic}
+            onClick={() => updateOverlay(item.id, { italic: !item.italic } as Partial<OverlayItem>)}
+            title="斜体"
+          >
+            <i>I</i>
+          </ToggleButton>
+        </div>
       </div>
     </div>
   );
