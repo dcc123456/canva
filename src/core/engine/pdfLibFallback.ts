@@ -90,6 +90,45 @@ function rectOfLine(
   };
 }
 
+/**
+ * 把同一行内的 pdfjs TextItem 按几何位置拼成文字,保留 PDF 中真实的
+ * 空格宽度。和 "join(' ') + replace(/\s+/g,' ') + trim()" 的区别:
+ *   - 不把多个连续空格塌成单个空格
+ *   - 不去掉行首/行尾的空格
+ *   - 片段之间的间距按 x 坐标差换算成对应数量的空格
+ * 这样编辑模式下看到的文字和 pdfjs 渲染的页面保持一致 (WYSIWYG)。
+ */
+function joinItemsPreservingSpaces(items: PdfJsTextItem[]): string {
+  if (items.length === 0) return '';
+  const sorted = [...items].sort((a, b) => a.transform[4] - b.transform[4]);
+  // 用本行最大字号估算一个空格字符的宽度 (常规字体空格约 0.25em)。
+  let maxFontScale = 0;
+  for (const it of sorted) {
+    const fs = Math.hypot(it.transform[2], it.transform[3]);
+    if (fs > maxFontScale) maxFontScale = fs;
+  }
+  const spaceUnit = Math.max(maxFontScale * 0.25, 1);
+
+  let text = '';
+  let prevEndX: number | null = null;
+  for (const it of sorted) {
+    const xStart = it.transform[4];
+    if (prevEndX !== null) {
+      const gap = xStart - prevEndX;
+      // 两侧任一侧已经自带空白时不补,避免叠成双空格。
+      const alreadySpaced = /\s$/.test(text) || /^\s/.test(it.str);
+      // 只在确实有正向间距 (大于 ~0.3 个空格宽度) 时才补空格。
+      if (gap > spaceUnit * 0.3 && !alreadySpaced) {
+        const numSpaces = Math.max(1, Math.round(gap / spaceUnit));
+        text += ' '.repeat(numSpaces);
+      }
+    }
+    text += it.str;
+    prevEndX = xStart + (it.width || 0);
+  }
+  return text;
+}
+
 async function detectTextBlocksImpl(
   opts: DetectTextBlocksOptions
 ): Promise<TextBlock[]> {
@@ -110,13 +149,10 @@ async function detectTextBlocksImpl(
   const lineInfos: LineInfo[] = [];
   for (const line of lines) {
     const { rect, fontSize, fontName } = rectOfLine(viewport.height, line.items);
-    const text = line.items
-      .sort((a, b) => a.transform[4] - b.transform[4])
-      .map((it) => it.str)
-      .join(' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-    if (!text) continue;
+    // WYSIWYG: 按几何位置拼字,保留 PDF 中真实的多空格和行首/行尾空格,
+    // 不再 collapse / trim -- 这样编辑模式看到的文字和 pdfjs 渲染一致。
+    const text = joinItemsPreservingSpaces(line.items);
+    if (!text.trim()) continue;
     lineInfos.push({
       baseline: line.y,
       rect,
@@ -146,7 +182,10 @@ async function detectTextBlocksImpl(
     paragraphs.push({ lines: [li] });
   }
   const blocks: TextBlock[] = paragraphs.map((para, i) => {
-    const text = para.lines.map((l) => l.text).join('\n').trim();
+    // WYSIWYG: 保留段落首尾真实空格,不再 trim。
+    // 注意:每行已在上面用 `if (!text.trim()) continue` 过滤掉纯空白行,
+    // 所以段落里至少有一行非空白文字,不会出现段落整体为空白的情况。
+    const text = para.lines.map((l) => l.text).join('\n');
     const minX = Math.min(...para.lines.map((l) => l.rect.x));
     const minY = Math.min(...para.lines.map((l) => l.rect.y));
     const maxRight = Math.max(...para.lines.map((l) => l.rect.x + l.rect.w));

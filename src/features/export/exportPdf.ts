@@ -62,8 +62,10 @@ export async function exportPdf(
   onProgress?.({ phase: 'pages' });
   await applyPages(doc, pages, originalBytes);
 
-  // Step 1: 对已编辑/移动的 text-block 统一应用(字符级白底 + 重画新字)。
-  // 未编辑且未移动的 text-block 原字已在 PDF 里,不需要处理。
+  // Step 1: 对已编辑/移动/改样式的 text-block 统一应用(字符级白底 + 重画新字)。
+  // 未编辑且未移动且未改样式的 text-block 原字已在 PDF 里,不需要处理。
+  // segments 非空表示用户在 contenteditable 里改过富文本样式(粗体/斜体/颜色),
+  // 即使文字内容没变也需要白底覆盖原字 + 重画带样式的新字。
   onProgress?.({ phase: 'textedits' });
   const editedTextBlocks = overlays.filter(
     (o): o is TextBlockItem =>
@@ -72,7 +74,8 @@ export async function exportPdf(
         o.bbox.x !== o.originalBbox.x ||
         o.bbox.y !== o.originalBbox.y ||
         o.bbox.w !== o.originalBbox.w ||
-        o.bbox.h !== o.originalBbox.h)
+        o.bbox.h !== o.originalBbox.h ||
+        (o.segments != null && o.segments.length > 0))
   );
   if (editedTextBlocks.length > 0) {
     // 预加载 CJK 字体:如果有编辑过的 text-block 含中文,需要 CJK 字体。

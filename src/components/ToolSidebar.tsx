@@ -7,14 +7,11 @@
 // TopBar via the engine store.
 import clsx from 'clsx';
 import { useEditorStore } from '../store/editorStore';
-import { useDocumentStore } from '../store/documentStore';
-import { useEngineStore } from '../store/engineStore';
 import { usePenStore } from '../store/penStore';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import type { Tool } from '../core/types';
-import { detectTextBlocksForPage } from '../features/text-edit/detectTextBlocks';
-import { detectFormFields } from '../features/forms/detectFormFields';
-import { toast } from '../utils/toast';
+import { runEngineDetection } from '../features/text-edit/runEngineDetection';
+import { useAutoDetectTextBlocks } from '../features/text-edit/useAutoDetectTextBlocks';
 
 interface ToolDef {
   tool: Tool;
@@ -51,6 +48,10 @@ export function ToolSidebar({ onPickImage, onOpenSignature }: ToolSidebarProps) 
   // Wire up global keyboard shortcuts (tool switching, undo/redo, delete, esc).
   useKeyboardShortcuts();
 
+  // Auto-run text-block detection when edit-text is active and the current
+  // page hasn't been detected yet (default tool is edit-text).
+  useAutoDetectTextBlocks();
+
   function pickTool(t: Tool) {
     if (t === 'image') {
       onPickImage();
@@ -63,104 +64,6 @@ export function ToolSidebar({ onPickImage, onOpenSignature }: ToolSidebarProps) 
     setTool(t);
     if (t === 'edit-text' || t === 'form') {
       void runEngineDetection(t);
-    }
-  }
-
-  async function runEngineDetection(t: 'edit-text' | 'form') {
-    const { pdfBytes, pages, addOverlay, removeOverlay } =
-      useDocumentStore.getState();
-    const eng = useEngineStore.getState();
-
-    if (!pdfBytes || pages.length === 0) {
-      eng.setEngineStatusMessage('请先打开 PDF');
-      window.setTimeout(() => eng.setEngineStatusMessage(null), 3000);
-      return;
-    }
-
-    eng.setDetectionVisible(true);
-    eng.setDetectionProgress(0);
-    eng.setDetectionLabel('初始化引擎');
-    eng.setEngineStatusMessage(null);
-
-    try {
-      // Defensive copy: the underlying ArrayBuffer may have been transferred
-      // to a pdfjs worker and detached. Cloning here guarantees a fresh buffer.
-      const safeBytes = new Uint8Array(pdfBytes);
-      if (t === 'edit-text') {
-        const pageIndex = useEditorStore.getState().currentPageIndex;
-        const currentPage = pages[pageIndex];
-        if (currentPage) {
-          // Wipe previous text-block overlays for this page so detection is idempotent.
-          useDocumentStore
-            .getState()
-            .overlays.filter(
-              (o) => o.type === 'text-block' && o.pageId === currentPage.id
-            )
-            .forEach((o) => removeOverlay(o.id));
-        }
-        const { blocks } = await detectTextBlocksForPage({
-          pageIndex,
-          pdfBytes: safeBytes,
-          onProgress: (p, label) => {
-            eng.setDetectionProgress(p);
-            if (label) eng.setDetectionLabel(label);
-          },
-        });
-        if (currentPage) {
-          for (const b of blocks) {
-            addOverlay({
-              id: b.id,
-              pageId: currentPage.id,
-              type: 'text-block',
-              bbox: b.bbox,
-              originalBbox: b.bbox,
-              originalText: b.text,
-              text: b.text,
-              font: b.font,
-              fontSize: b.fontSize,
-              color: b.color,
-              lineHeight: b.lineHeight,
-              bold: b.bold,
-              italic: b.italic,
-            });
-          }
-        }
-        eng.setEngineStatusMessage(`检测到 ${blocks.length} 个文本块`);
-      } else {
-        // form detection
-        const fields = await detectFormFields({
-          pdfBytes: safeBytes,
-          onProgress: (p, label) => {
-            eng.setDetectionProgress(p);
-            if (label) eng.setDetectionLabel(label);
-          },
-        });
-        for (const f of fields) {
-          const page = pages[f.pageIndex];
-          if (!page) continue;
-          addOverlay({
-            id: f.id,
-            pageId: page.id,
-            type: 'form-field',
-            fieldName: f.fieldName,
-            kind: f.kind,
-            bbox: f.bbox,
-            options: f.options,
-            value: f.value,
-          });
-        }
-        eng.setEngineStatusMessage(`检测到 ${fields.length} 个表单字段`);
-      }
-    } catch (err) {
-      console.error(err);
-      const msg = err instanceof Error ? err.message : String(err);
-      eng.setEngineStatusMessage(`引擎调用失败: ${msg}`);
-      toast.error(`引擎调用失败: ${msg}`);
-    } finally {
-      eng.setDetectionProgress(1);
-      eng.setDetectionLabel('完成');
-      window.setTimeout(() => eng.setDetectionVisible(false), 400);
-      window.setTimeout(() => eng.setEngineStatusMessage(null), 3000);
     }
   }
 

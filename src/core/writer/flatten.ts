@@ -9,6 +9,7 @@ import {
   StandardFonts,
 } from 'pdf-lib';
 import type { PDFFont } from 'pdf-lib';
+import fontkit from '@pdf-lib/fontkit';
 import type {
   DrawingItem,
   HighlightItem,
@@ -19,7 +20,8 @@ import type {
   StickyNoteItem,
   TextItem,
 } from '../types';
-import { hexToRgb, pickStandardFont } from './helpers';
+import { hexToRgb, pickStandardFont, wrapText, alignedX } from './helpers';
+import { loadCjkFontBytes, containsNonAscii } from './cjkFont';
 
 export async function flattenOverlays(
   doc: PDFDocument,
@@ -35,6 +37,43 @@ export async function flattenOverlays(
     const f = await doc.embedFont(name);
     fontCache.set(name, f);
     return f;
+  }
+
+  // CJK 字体支持:便签/文字工具的文字可能含中文,StandardFonts 不支持。
+  let cjkFont: PDFFont | null = null;
+  let cjkFontAttempted = false;
+
+  async function getFontForText(
+    text: string,
+    bold = false,
+    italic = false,
+    fontName = 'Helvetica'
+  ): Promise<{ font: PDFFont; safe: string }> {
+    const needsCjk = containsNonAscii(text);
+    if (needsCjk) {
+      if (!cjkFontAttempted) {
+        cjkFontAttempted = true;
+        doc.registerFontkit(fontkit);
+        const bytes = await loadCjkFontBytes();
+        if (bytes) {
+          cjkFont = await doc.embedFont(bytes, { subset: false });
+        }
+      }
+      if (cjkFont) {
+        return { font: cjkFont, safe: text };
+      }
+      // CJK 不可用 -- 替换为 '?' 降级。
+      const name = pickStandardFont(fontName, bold, italic);
+      const f = await getFont(name);
+      let safe = '';
+      for (const ch of text) {
+        safe += (ch.codePointAt(0) ?? 0) > 0x7e ? '?' : ch;
+      }
+      return { font: f, safe };
+    }
+    const name = pickStandardFont(fontName, bold, italic);
+    const f = await getFont(name);
+    return { font: f, safe: text };
   }
 
   const pageById = new Map<string, { page: PDFPage; meta: PageMeta }>();
@@ -55,11 +94,11 @@ export async function flattenOverlays(
         break;
       }
       case 'note': {
-        drawNote(page, overlay, pageHeight);
+        await drawNote(page, overlay, pageHeight, getFontForText);
         break;
       }
       case 'text': {
-        await drawTextItem(page, overlay, meta, pageHeight, getFont);
+        await drawTextItem(page, overlay, meta, pageHeight, getFontForText);
         break;
       }
       case 'image': {
@@ -76,8 +115,6 @@ export async function flattenOverlays(
         break;
       }
       case 'form-field': {
-        // Reserved for Task 17 (AcroForm). Skip silently with a console note
-        // so the export still succeeds.
         console.warn(
           `[flatten] overlay type "form-field" is not exported in MVP.`
         );
@@ -119,56 +156,153 @@ function drawHighlight(
   });
 }
 
-function drawNote(
+// Phase 7: unified note style - square corners, opacity 0.9, stroke #a16207,
+// text 80 chars with \n multi-line support, CJK font via getFontForText.
+async function drawNote(
   page: PDFPage,
   item: StickyNoteItem,
-  pageHeight: number
-): void {
-  // The sticky note is rendered as a small coloured square (the "icon") so
-  // the user can spot the note in the exported PDF. The full text is drawn
-  // next to it as a fallback.
+  pageHeight: number,
+  getFontForText: (
+    text: string,
+    bold?: boolean,
+    italic?: boolean,
+    fontName?: string
+  ) => Promise<{ font: PDFFont; safe: string }>
+): Promise<void> {
   const y = pdfYFromTop(item.position.y, item.size.h, pageHeight);
   page.drawRectangle({
     x: item.position.x,
     y,
-    width: item.size.h, // square icon: edge = height
+    width: item.size.w,
     height: item.size.h,
     color: rgbFromHex(item.color),
     opacity: 0.9,
+    borderColor: rgbFromHex('#a16207'),
+    borderWidth: 1,
   });
   if (item.text) {
-    page.drawText(item.text.slice(0, 80), {
-      x: item.position.x + item.size.h + 4,
-      y: y + 2,
-      size: 8,
-      color: rgb(0.1, 0.1, 0.1),
-    });
+    const snippet = item.text.slice(0, 80);
+    const { font, safe } = await getFontForText(snippet);
+    const lines = safe.split('\n');
+    const fontSize = 10;
+    const lineStep = fontSize * 1.2;
+    // Baseline of first line: 16pt from the top of the note (matches SVG).
+    const baseY = y + item.size.h - 16;
+    for (let i = 0; i < lines.length; i++) {
+      page.drawText(lines[i], {
+        x: item.position.x + 6,
+        y: baseY - i * lineStep,
+        size: fontSize,
+        font,
+        color: rgb(0.1, 0.1, 0.1),
+      });
+    }
   }
 }
 
+// Phase 2+3+4+6: drawTextItem with multi-line, auto-wrap, alignment, segments.
 async function drawTextItem(
   page: PDFPage,
   item: TextItem,
   _meta: PageMeta,
   pageHeight: number,
-  getFont: (name: StandardFonts) => Promise<PDFFont>
+  getFontForText: (
+    text: string,
+    bold?: boolean,
+    italic?: boolean,
+    fontName?: string
+  ) => Promise<{ font: PDFFont; safe: string }>
 ): Promise<void> {
-  const fontName = pickStandardFont(item.font, item.bold, item.italic);
-  const font = await getFont(fontName);
-  const size = item.fontSize;
-  // pdf-lib's drawText anchors at the baseline, which is at the bottom of the
-  // text. The store's position is the top-left of the text box, so the
-  // baseline is roughly `position.y + fontSize` in y-down coordinates.
-  const yDown = pageHeight - item.position.y - size;
+  const fontSize = item.fontSize;
+  const lineHeight = item.lineHeight || 1.2;
+  const align = item.align || 'left';
+  const boxX = item.position.x;
+  const boxY = item.position.y;
+  const boxW = item.size.w;
+  const rotation = item.rotation;
   const { r, g, b } = hexToRgb(item.color);
-  page.drawText(item.text, {
-    x: item.position.x,
-    y: yDown,
-    size,
-    font,
-    color: rgb(r, g, b),
-    rotate: item.rotation !== 0 ? degrees(item.rotation) : undefined,
-  });
+
+  if (item.segments && item.segments.length > 0) {
+    // Phase 6: draw segments sequentially with per-line alignment.
+    // Each segment may contain \n which starts a new line.
+    type SegInfo = {
+      text: string;
+      font: PDFFont;
+      width: number;
+      color: string;
+    };
+    const lines: SegInfo[][] = [[]];
+
+    for (const seg of item.segments) {
+      const segBold = seg.bold ?? item.bold;
+      const segItalic = seg.italic ?? item.italic;
+      const segColor = seg.color || item.color;
+      const parts = seg.text.split('\n');
+      for (let pi = 0; pi < parts.length; pi++) {
+        if (pi > 0) lines.push([]);
+        const partText = parts[pi];
+        if (partText) {
+          const { font, safe } = await getFontForText(
+            partText,
+            segBold,
+            segItalic,
+            item.font
+          );
+          const width = font.widthOfTextAtSize(safe, fontSize);
+          lines[lines.length - 1].push({
+            text: safe,
+            font,
+            width,
+            color: segColor,
+          });
+        }
+      }
+    }
+
+    const lineStep = fontSize * lineHeight;
+    for (let li = 0; li < lines.length; li++) {
+      const segs = lines[li];
+      if (segs.length === 0) continue;
+      const totalW = segs.reduce((sum, s) => sum + s.width, 0);
+      let x = alignedX(align, boxX, boxW, totalW);
+      const y = pageHeight - boxY - fontSize - li * lineStep;
+      for (const s of segs) {
+        const { r: sr, g: sg, b: sb } = hexToRgb(s.color);
+        page.drawText(s.text, {
+          x,
+          y,
+          size: fontSize,
+          font: s.font,
+          color: rgb(sr, sg, sb),
+          rotate: rotation !== 0 ? degrees(rotation) : undefined,
+        });
+        x += s.width;
+      }
+    }
+  } else {
+    // No segments: use whole-text bold/italic/color with auto-wrap.
+    const { font, safe } = await getFontForText(
+      item.text,
+      item.bold,
+      item.italic,
+      item.font
+    );
+    const wrappedLines = wrapText(font, safe, boxW, fontSize);
+    const lineStep = fontSize * lineHeight;
+    for (let i = 0; i < wrappedLines.length; i++) {
+      const lineW = font.widthOfTextAtSize(wrappedLines[i], fontSize);
+      const x = alignedX(align, boxX, boxW, lineW);
+      const y = pageHeight - boxY - fontSize - i * lineStep;
+      page.drawText(wrappedLines[i], {
+        x,
+        y,
+        size: fontSize,
+        font,
+        color: rgb(r, g, b),
+        rotate: rotation !== 0 ? degrees(rotation) : undefined,
+      });
+    }
+  }
 }
 
 async function drawImageItem(
@@ -204,8 +338,6 @@ function drawDrawing(
   item: DrawingItem,
   pageHeight: number
 ): void {
-  // Parse the SVG path d string, simplify curves to polylines, and draw
-  // each M..L segment as a series of drawLine calls.
   const segments = parsePathToSegments(item.path);
   const { r, g, b } = hexToRgb(item.color);
   const color = rgb(r, g, b);
@@ -227,7 +359,6 @@ function drawDrawing(
 function parsePathToSegments(
   d: string
 ): Array<Array<{ x: number; y: number }>> {
-  // Tokens: command letters plus numbers.
   const tokens = d.match(/[a-zA-Z]|-?\d*\.?\d+(?:e[-+]?\d+)?/g) ?? [];
   const segments: Array<Array<{ x: number; y: number }>> = [];
   let current: Array<{ x: number; y: number }> = [];
@@ -267,7 +398,6 @@ function parsePathToSegments(
       }
       current.push({ x: cx, y: cy });
     } else if (tk === 'C' || tk === 'c') {
-      // Cubic curves: ignore control points, line to the endpoint.
       i += 1;
       const p1 = readPt();
       const p2 = readPt();
@@ -302,7 +432,6 @@ function parsePathToSegments(
         current = [];
       }
     } else {
-      // Unknown / numeric-only continuation (implicit L) — treat as LineTo.
       const x = Number(tk);
       if (Number.isFinite(x)) {
         const y = Number(tokens[i + 1]);

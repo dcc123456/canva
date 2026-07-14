@@ -1,9 +1,32 @@
 // ElementRenderer: dispatches SVG rendering for each overlay item type.
-import type { OverlayItem } from '../../core/types';
+import type { OverlayItem, RichTextSegment } from '../../core/types';
 
 export interface ElementRendererProps {
   overlay: OverlayItem;
   selected?: boolean;
+}
+
+/** Build the inline-segment spans for a foreignObject div. */
+function renderSegments(
+  segments: RichTextSegment[] | undefined,
+  text: string,
+  color: string
+) {
+  if (!segments || segments.length === 0) {
+    return text;
+  }
+  return segments.map((s, i) => (
+    <span
+      key={i}
+      style={{
+        fontWeight: s.bold ? 700 : 400,
+        fontStyle: s.italic ? 'italic' : 'normal',
+        color: s.color || color,
+      }}
+    >
+      {s.text}
+    </span>
+  ));
 }
 
 export function ElementRenderer({ overlay, selected = false }: ElementRendererProps) {
@@ -22,6 +45,9 @@ export function ElementRenderer({ overlay, selected = false }: ElementRendererPr
       );
     }
     case 'note': {
+      // Phase 7: square corners (pdf-lib does not support rounded rects),
+      // opacity 0.9, stroke #a16207, text 80 chars with \n support.
+      const noteLines = overlay.text.slice(0, 80).split('\n');
       return (
         <g pointerEvents="none">
           <rect
@@ -30,25 +56,39 @@ export function ElementRenderer({ overlay, selected = false }: ElementRendererPr
             width={overlay.size.w}
             height={overlay.size.h}
             fill={overlay.color}
+            fillOpacity={0.9}
             stroke="#a16207"
             strokeWidth={1}
-            rx={3}
-            ry={3}
           />
-          <text
-            x={overlay.position.x + 6}
-            y={overlay.position.y + 16}
-            fontSize={10}
-            fill="#1f2937"
-          >
-            {overlay.text.slice(0, 40)}
-          </text>
+          {noteLines.map((line, i) => (
+            <text
+              key={i}
+              x={overlay.position.x + 6}
+              y={overlay.position.y + 16 + i * 12}
+              fontSize={10}
+              fill="#1f2937"
+            >
+              {line}
+            </text>
+          ))}
         </g>
       );
     }
     case 'text': {
+      // Phase 2+3+4+6: use foreignObject for auto-wrap, alignment,
+      // multi-line and rich-text segments.
+      const lh = overlay.lineHeight || 1.2;
+      const align = overlay.align || 'left';
       return (
-        <g pointerEvents="none">
+        <g
+          pointerEvents="none"
+          transform={
+            overlay.rotation !== 0
+              ? `rotate(${overlay.rotation} ${overlay.position.x} ${overlay.position.y})`
+              : undefined
+          }
+        >
+          {/* Dashed selection border */}
           <rect
             x={overlay.position.x}
             y={overlay.position.y}
@@ -59,19 +99,38 @@ export function ElementRenderer({ overlay, selected = false }: ElementRendererPr
             strokeDasharray="2,2"
             strokeWidth={0.5}
           />
-          <text
-            x={overlay.position.x + 2}
-            y={overlay.position.y + overlay.fontSize}
-            fontSize={overlay.fontSize}
-            fontFamily={overlay.font}
-            fill={overlay.color}
-            fontWeight={overlay.bold ? 700 : 400}
-            fontStyle={overlay.italic ? 'italic' : 'normal'}
-            textDecoration={overlay.underline ? 'underline' : 'none'}
-            transform={`rotate(${overlay.rotation} ${overlay.position.x} ${overlay.position.y})`}
+          {/* foreignObject embeds HTML so CSS handles wrapping, alignment
+              and rich-text segments natively. Coordinates are in PDF space
+              (the SVG viewBox handles zoom scaling). */}
+          <foreignObject
+            x={overlay.position.x}
+            y={overlay.position.y}
+            width={overlay.size.w}
+            height={overlay.size.h}
           >
-            {overlay.text}
-          </text>
+            <div
+              style={{
+                width: '100%',
+                height: '100%',
+                fontFamily: overlay.font,
+                fontSize: overlay.fontSize,
+                color: overlay.color,
+                fontWeight: overlay.bold ? 700 : 400,
+                fontStyle: overlay.italic ? 'italic' : 'normal',
+                textDecoration: overlay.underline ? 'underline' : 'none',
+                textAlign: align,
+                lineHeight: String(lh),
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+                overflow: 'hidden',
+                boxSizing: 'border-box',
+                margin: 0,
+                padding: 0,
+              }}
+            >
+              {renderSegments(overlay.segments, overlay.text, overlay.color)}
+            </div>
+          </foreignObject>
         </g>
       );
     }
@@ -104,13 +163,10 @@ export function ElementRenderer({ overlay, selected = false }: ElementRendererPr
     }
     case 'text-block': {
       // text-block 文字由 PDF.js 在底层 canvas 渲染,正常情况下我们不
-      // 再重复渲染 —— 但当用户进入"编辑文字"模式或拖动该 block 时,
+      // 再重复渲染 -- 但当用户进入"编辑文字"模式或拖动该 block 时,
       // 底层 canvas 上的原字仍然显示,与编辑浮层 / 拖动后的视觉位置
       // 不一致,所以需要用白色矩形先把底层 canvas 上的原字遮住,再在
-      // 上方画 SVG 文字。
-      //
-      // 注:SelectionFrame 拖动时仅更新 bbox,所以原 PDF.js 的字永远在
-      // 原位置不变化;在拖动过程中,我们用 SVG 文字跟随拖动位置渲染。
+      // 上方画文字。
       const moved =
         overlay.bbox.x !== overlay.originalBbox.x ||
         overlay.bbox.y !== overlay.originalBbox.y ||
@@ -118,10 +174,11 @@ export function ElementRenderer({ overlay, selected = false }: ElementRendererPr
         overlay.bbox.h !== overlay.originalBbox.h;
       const edited = overlay.text !== overlay.originalText || moved;
       const showOverlay = edited || selected;
+      const lh = overlay.lineHeight || 1.2;
+      const align = overlay.align || 'left';
       return (
         <>
-          {/* 白底画在 originalBbox:盖住 pdfjs canvas 上原位置的原字。
-              移动后 originalBbox != bbox,旧位置原字被盖,新位置画新字。 */}
+          {/* 白底画在 originalBbox:盖住 pdfjs canvas 上原位置的原字 */}
           {showOverlay && (
             <rect
               x={overlay.originalBbox.x}
@@ -145,27 +202,38 @@ export function ElementRenderer({ overlay, selected = false }: ElementRendererPr
             strokeDasharray="3 2"
             pointerEvents="none"
           />
-          {/* 新字画在 bbox(当前位置),多行按 lineHeight 间距 */}
-          {showOverlay &&
-            overlay.text.split('\n').map((line, i) => (
-              <text
-                key={i}
-                x={overlay.bbox.x}
-                y={
-                  overlay.bbox.y +
-                  overlay.fontSize +
-                  i * overlay.fontSize * (overlay.lineHeight || 1.2)
-                }
-                fontSize={overlay.fontSize}
-                fontFamily={overlay.font}
-                fontWeight={overlay.bold ? 700 : 400}
-                fontStyle={overlay.italic ? 'italic' : 'normal'}
-                fill={overlay.color}
-                pointerEvents="none"
+          {/* 新字画在 bbox(当前位置) -- Phase 2+3+4+6: foreignObject
+              for wrapping, alignment, multi-line and segments */}
+          {showOverlay && (
+            <foreignObject
+              x={overlay.bbox.x}
+              y={overlay.bbox.y}
+              width={overlay.bbox.w}
+              height={overlay.bbox.h}
+            >
+              <div
+                style={{
+                  width: '100%',
+                  height: '100%',
+                  fontFamily: overlay.font,
+                  fontSize: overlay.fontSize,
+                  color: overlay.color,
+                  fontWeight: overlay.bold ? 700 : 400,
+                  fontStyle: overlay.italic ? 'italic' : 'normal',
+                  textAlign: align,
+                  lineHeight: String(lh),
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                  overflow: 'hidden',
+                  boxSizing: 'border-box',
+                  margin: 0,
+                  padding: 0,
+                }}
               >
-                {line}
-              </text>
-            ))}
+                {renderSegments(overlay.segments, overlay.text, overlay.color)}
+              </div>
+            </foreignObject>
+          )}
         </>
       );
     }

@@ -117,22 +117,34 @@ async function applyToStores(
     setTotalPages(file.pages.length);
   }
   setOverlays(
-    // 旧存档迁移:text-block 可能缺 originalBbox / lineHeight / bold / italic 字段。
+    // 旧存档迁移:text-block 可能缺 originalBbox / lineHeight / bold / italic
+    // / align / segments 字段;text 可能缺 align / lineHeight / segments。
     file.overlays.map((o) => {
-      if (o.type !== 'text-block') return o;
+      if (o.type !== 'text-block' && o.type !== 'text') return o;
       const patch: Record<string, unknown> = {};
-      if (!(o as { originalBbox?: unknown }).originalBbox) {
-        patch.originalBbox = { ...o.bbox };
+      if (o.type === 'text-block') {
+        if (!(o as { originalBbox?: unknown }).originalBbox) {
+          patch.originalBbox = { ...o.bbox };
+        }
+        if ((o as { lineHeight?: number }).lineHeight === undefined) {
+          patch.lineHeight = 1.2;
+        }
+        if ((o as { bold?: boolean }).bold === undefined) {
+          patch.bold = false;
+        }
+        if ((o as { italic?: boolean }).italic === undefined) {
+          patch.italic = false;
+        }
       }
-      if ((o as { lineHeight?: number }).lineHeight === undefined) {
+      // Phase 1 migration: align defaults to 'left' for both text and text-block.
+      if ((o as { align?: unknown }).align === undefined) {
+        patch.align = 'left';
+      }
+      // text items also need lineHeight default.
+      if (o.type === 'text' && (o as { lineHeight?: number }).lineHeight === undefined) {
         patch.lineHeight = 1.2;
       }
-      if ((o as { bold?: boolean }).bold === undefined) {
-        patch.bold = false;
-      }
-      if ((o as { italic?: boolean }).italic === undefined) {
-        patch.italic = false;
-      }
+      // segments: leave undefined if absent (optional field).
       return Object.keys(patch).length > 0 ? { ...o, ...patch } : o;
     })
   );

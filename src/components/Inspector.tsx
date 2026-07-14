@@ -1,26 +1,153 @@
 // Inspector: right-side property panel for the currently selected overlay.
 // - Common: X / Y / W / H / rotation + delete.
-// - Text: font family (3 built-ins + Custom), size, color, bold/italic/underline.
-import { useEffect, useMemo, useState } from 'react';
+// - Text: font family (built-ins + Chinese fonts + Custom), size, color,
+//   bold/italic/underline, align, line-height, rich-text contenteditable.
+// - TextBlock: same as Text plus commit-on-blur via useCommitTextBlock.
+import { useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { useDocumentStore } from '../store/documentStore';
 import { useEditorStore } from '../store/editorStore';
 import { useCommitTextBlock } from '../features/text-edit/useCommitTextBlock';
+import { FloatingTextToolbar } from './FloatingTextToolbar';
 import type {
   DrawingItem,
   HighlightItem,
   ImageItem,
   OverlayItem,
   PageMeta,
+  RichTextSegment,
   StickyNoteItem,
+  TextAlign,
   TextBlockItem,
   TextItem,
 } from '../core/types';
 
-const BUILTIN_FONTS = ['Helvetica', 'TimesRoman', 'Courier'] as const;
+const BUILTIN_FONTS = [
+  'Helvetica',
+  'TimesRoman',
+  'Courier',
+  'SimSun',
+  'SimHei',
+  'Microsoft YaHei',
+  'KaiTi',
+] as const;
 type BuiltinFont = (typeof BUILTIN_FONTS)[number];
 const isBuiltinFont = (s: string): s is BuiltinFont =>
   (BUILTIN_FONTS as readonly string[]).includes(s);
+
+// ---------- Rich-text segment utilities --------------------------------------
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/** Convert rgb(r, g, b) to #rrggbb; pass through hex and named colors. */
+function normalizeColor(color: string): string {
+  const m = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+  if (m) {
+    const r = parseInt(m[1]).toString(16).padStart(2, '0');
+    const g = parseInt(m[2]).toString(16).padStart(2, '0');
+    const b = parseInt(m[3]).toString(16).padStart(2, '0');
+    return `#${r}${g}${b}`;
+  }
+  return color;
+}
+
+/** Build innerHTML for the contenteditable from segments (or plain text). */
+function segmentsToHtml(
+  segments: RichTextSegment[] | undefined,
+  text: string
+): string {
+  if (!segments || segments.length === 0) {
+    return escapeHtml(text).replace(/\n/g, '<br>');
+  }
+  return segments
+    .map((s) => {
+      let html = escapeHtml(s.text).replace(/\n/g, '<br>');
+      if (s.bold) html = `<b>${html}</b>`;
+      if (s.italic) html = `<i>${html}</i>`;
+      if (s.color) html = `<span style="color:${s.color}">${html}</span>`;
+      return html;
+    })
+    .join('');
+}
+
+/**
+ * Walk a contenteditable's childNodes and extract RichTextSegments.
+ * Handles <b>, <i>, <span style="color">, <font color>, <br>, and nesting.
+ */
+function extractSegments(el: HTMLElement): {
+  text: string;
+  segments: RichTextSegment[];
+} {
+  const raw: RichTextSegment[] = [];
+
+  function walk(
+    node: Node,
+    pBold: boolean,
+    pItalic: boolean,
+    pColor?: string
+  ): void {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const t = node.textContent ?? '';
+      if (t) {
+        const seg: RichTextSegment = { text: t };
+        if (pBold) seg.bold = true;
+        if (pItalic) seg.italic = true;
+        if (pColor) seg.color = pColor;
+        raw.push(seg);
+      }
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const elem = node as HTMLElement;
+    if (elem.tagName === 'BR') {
+      const seg: RichTextSegment = { text: '\n' };
+      if (pBold) seg.bold = true;
+      if (pItalic) seg.italic = true;
+      if (pColor) seg.color = pColor;
+      raw.push(seg);
+      return;
+    }
+    const bold =
+      pBold ||
+      elem.tagName === 'B' ||
+      elem.style.fontWeight === 'bold' ||
+      elem.style.fontWeight === '700';
+    const italic =
+      pItalic || elem.tagName === 'I' || elem.style.fontStyle === 'italic';
+    const color =
+      normalizeColor(elem.style.color || elem.getAttribute('color') || '') ||
+      pColor;
+    elem.childNodes.forEach((c) => walk(c, bold, italic, color));
+  }
+
+  el.childNodes.forEach((c) => walk(c, false, false, undefined));
+
+  // Merge adjacent segments with identical formatting.
+  const merged: RichTextSegment[] = [];
+  for (const seg of raw) {
+    const last = merged[merged.length - 1];
+    if (
+      last &&
+      !!last.bold === !!seg.bold &&
+      !!last.italic === !!seg.italic &&
+      (last.color || '') === (seg.color || '')
+    ) {
+      last.text += seg.text;
+    } else {
+      merged.push({ ...seg });
+    }
+  }
+
+  const fullText = merged.map((s) => s.text).join('');
+  return { text: fullText, segments: merged };
+}
+
+// ---------- Shared sub-components --------------------------------------------
 
 interface CommonBoxFields {
   x: number;
@@ -49,7 +176,6 @@ function readCommon(item: OverlayItem): CommonBoxFields | null {
       return { x: it.position.x, y: it.position.y, w: it.size.w, h: it.size.h, rotation: it.rotation };
     }
     case 'drawing': {
-      // Drawing doesn't have a fixed bbox; skip common geometry.
       return null;
     }
     case 'text-block':
@@ -166,6 +292,160 @@ function ToggleButton({
     </button>
   );
 }
+
+/** Three-button alignment selector (left / center / right). */
+function AlignButtonGroup({
+  align,
+  onChange,
+}: {
+  align: TextAlign;
+  onChange: (a: TextAlign) => void;
+}) {
+  return (
+    <div className="flex items-center gap-1">
+      <ToggleButton
+        active={align === 'left'}
+        onClick={() => onChange('left')}
+        title="左对齐"
+      >
+        左
+      </ToggleButton>
+      <ToggleButton
+        active={align === 'center'}
+        onClick={() => onChange('center')}
+        title="居中"
+      >
+        中
+      </ToggleButton>
+      <ToggleButton
+        active={align === 'right'}
+        onClick={() => onChange('right')}
+        title="右对齐"
+      >
+        右
+      </ToggleButton>
+    </div>
+  );
+}
+
+/** Shared font selector dropdown for Text and TextBlock controls. */
+function FontSelector({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (font: string) => void;
+}) {
+  const fontIsBuiltin = isBuiltinFont(value);
+  return (
+    <select
+      value={fontIsBuiltin ? value : 'Custom'}
+      onChange={(e) => {
+        const v = e.target.value;
+        if (v === 'Custom') {
+          const name = window.prompt('输入字体名称', value || 'sans-serif') ?? value;
+          onChange(name);
+        } else {
+          onChange(v);
+        }
+      }}
+      className="rounded border px-1 py-0.5"
+    >
+      {BUILTIN_FONTS.map((f) => (
+        <option key={f} value={f}>
+          {f}
+        </option>
+      ))}
+      <option value="Custom">Custom...</option>
+    </select>
+  );
+}
+
+/**
+ * RichTextEditor: a contenteditable div with a B/I/color toolbar.
+ * Used by both TextControls (TextItem) and TextBlockControls (TextBlockItem).
+ *
+ * The editor is uncontrolled: initial content is set via innerHTML on mount
+ * and whenever the external text changes while the editor is not focused.
+ * On blur the parent's onCommit callback receives the extracted plain text
+ * and RichTextSegment[].
+ */
+function RichTextEditor({
+  editorRef,
+  initialText,
+  initialSegments,
+  font,
+  fontSize,
+  color,
+  bold,
+  italic,
+  onInput,
+  onBlur,
+}: {
+  editorRef: React.RefObject<HTMLDivElement | null>;
+  initialText: string;
+  initialSegments?: RichTextSegment[];
+  font: string;
+  fontSize: number;
+  color: string;
+  bold: boolean;
+  italic: boolean;
+  onInput?: () => void;
+  onBlur?: () => void;
+}) {
+  // Set / refresh innerHTML when the external source text changes and the
+  // editor is not focused (avoids clobbering the user's in-progress edit).
+  useEffect(() => {
+    const el = editorRef.current;
+    if (!el) return;
+    if (document.activeElement === el) return;
+    const html = segmentsToHtml(initialSegments, initialText);
+    if (el.innerHTML !== html) {
+      el.innerHTML = html;
+    }
+  }, [initialText, initialSegments, editorRef]);
+
+  return (
+    <div>
+      <FloatingTextToolbar editorRef={editorRef} />
+      {/* contenteditable body */}
+      <div
+        ref={editorRef}
+        contentEditable
+        suppressContentEditableWarning
+        onPointerDown={(e) => e.stopPropagation()}
+        onInput={() => onInput?.()}
+        onBlur={() => onBlur?.()}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            (e.currentTarget as HTMLElement).blur();
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            const el = editorRef.current;
+            if (el) {
+              el.innerHTML = segmentsToHtml(initialSegments, initialText);
+            }
+            (e.currentTarget as HTMLElement).blur();
+          }
+        }}
+        className="min-h-[3rem] rounded border border-gray-300 px-1 py-0.5 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400"
+        style={{
+          fontFamily: font,
+          fontSize: `${Math.max(10, Math.min(20, fontSize))}px`,
+          color,
+          fontWeight: bold ? 700 : 400,
+          fontStyle: italic ? 'italic' : 'normal',
+          lineHeight: '1.2',
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+        }}
+      />
+    </div>
+  );
+}
+
+// ---------- Main Inspector ----------------------------------------------------
 
 export function Inspector() {
   const selectedId = useEditorStore((s) => s.selectedOverlayId);
@@ -305,6 +585,8 @@ function typeLabel(item: OverlayItem): string {
   }
 }
 
+// ---------- TextControls (TextItem) ------------------------------------------
+
 function TextControls({
   item,
   updateOverlay,
@@ -312,34 +594,19 @@ function TextControls({
   item: TextItem;
   updateOverlay: (id: string, patch: Partial<OverlayItem>) => void;
 }) {
-  const fontIsBuiltin = isBuiltinFont(item.font);
+  const editorRef = useRef<HTMLDivElement | null>(null);
+  const align: TextAlign = item.align || 'left';
+
   return (
     <div className="rounded border bg-white p-2">
       <div className="mb-2 text-[11px] uppercase tracking-wide text-gray-400">文字</div>
       <div className="flex flex-col gap-2">
         <label className="flex flex-col gap-1 text-xs text-gray-600">
           字体
-          <select
-            value={fontIsBuiltin ? item.font : 'Custom'}
-            onChange={(e) => {
-              const v = e.target.value;
-              if (v === 'Custom') {
-                // Use a generic sans-serif and let the user enter a name.
-                const name = window.prompt('输入字体名称', 'sans-serif') ?? 'sans-serif';
-                updateOverlay(item.id, { font: name } as Partial<OverlayItem>);
-              } else {
-                updateOverlay(item.id, { font: v } as Partial<OverlayItem>);
-              }
-            }}
-            className="rounded border px-1 py-0.5"
-          >
-            {BUILTIN_FONTS.map((f) => (
-              <option key={f} value={f}>
-                {f}
-              </option>
-            ))}
-            <option value="Custom">Custom...</option>
-          </select>
+          <FontSelector
+            value={item.font}
+            onChange={(font) => updateOverlay(item.id, { font } as Partial<OverlayItem>)}
+          />
         </label>
         <label className="flex flex-col gap-1 text-xs text-gray-600">
           字号
@@ -368,44 +635,65 @@ function TextControls({
             className="h-7 w-10 cursor-pointer border-0 bg-transparent p-0"
           />
         </label>
+        <label className="flex flex-col gap-1 text-xs text-gray-600">
+          行距
+          <input
+            type="number"
+            min={0.5}
+            max={5}
+            step={0.05}
+            value={item.lineHeight ?? 1.2}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v)) {
+                updateOverlay(item.id, {
+                  lineHeight: Math.max(0.5, Math.min(5, v)),
+                } as Partial<OverlayItem>);
+              }
+            }}
+            className="rounded border px-1 py-0.5"
+          />
+        </label>
+        {/* Phase 4: alignment buttons */}
         <div className="flex items-center gap-1">
-          <ToggleButton
-            active={item.bold}
-            onClick={() => updateOverlay(item.id, { bold: !item.bold } as Partial<OverlayItem>)}
-            title="粗体"
-          >
-            <b>B</b>
-          </ToggleButton>
-          <ToggleButton
-            active={item.italic}
-            onClick={() => updateOverlay(item.id, { italic: !item.italic } as Partial<OverlayItem>)}
-            title="斜体"
-          >
-            <i>I</i>
-          </ToggleButton>
-          <ToggleButton
-            active={item.underline}
-            onClick={() => updateOverlay(item.id, { underline: !item.underline } as Partial<OverlayItem>)}
-            title="下划线"
-          >
-            <u>U</u>
-          </ToggleButton>
+          <AlignButtonGroup
+            align={align}
+            onChange={(a) => updateOverlay(item.id, { align: a } as Partial<OverlayItem>)}
+          />
         </div>
+        {/* Phase 6: contenteditable rich-text editor */}
         <label className="flex flex-col gap-1 text-xs text-gray-600">
           文字内容
-          <textarea
-            value={item.text}
-            onChange={(e) =>
-              updateOverlay(item.id, { text: e.target.value } as Partial<OverlayItem>)
-            }
-            rows={3}
-            className="rounded border px-1 py-0.5"
+          <RichTextEditor
+            key={item.id}
+            editorRef={editorRef}
+            initialText={item.text}
+            initialSegments={item.segments}
+            font={item.font}
+            fontSize={item.fontSize}
+            color={item.color}
+            bold={item.bold}
+            italic={item.italic}
+            onBlur={() => {
+              const el = editorRef.current;
+              if (!el) return;
+              const { text, segments } = extractSegments(el);
+              const hasFormatting = segments.some(
+                (s) => s.bold || s.italic || s.color
+              );
+              updateOverlay(item.id, {
+                text,
+                segments: hasFormatting ? segments : undefined,
+              } as Partial<OverlayItem>);
+            }}
           />
         </label>
       </div>
     </div>
   );
 }
+
+// ---------- NoteControls -----------------------------------------------------
 
 function NoteControls({
   item,
@@ -438,6 +726,8 @@ function NoteControls({
     </div>
   );
 }
+
+// ---------- HighlightControls ------------------------------------------------
 
 function HighlightControls({
   item,
@@ -473,6 +763,8 @@ function HighlightControls({
   );
 }
 
+// ---------- DrawingControls --------------------------------------------------
+
 function DrawingControls({
   item,
   updateOverlay,
@@ -507,15 +799,12 @@ function DrawingControls({
   );
 }
 
-// ---------- TextBlockControls ----------------------------------------------
+// ---------- TextBlockControls ------------------------------------------------
 //
 // Inspector 面板里的"原文本块"控件:
-//   * 文字内容 textarea —— 提交时调 useCommitTextBlock,引擎(MuPDF /
-//     PDFium / 兜底)真把原字节从 PDF 内容流删掉再用新文字重画。
-//   * 字体 / 字号 / 颜色 —— 只影响 flatten 阶段重画新文字的视觉效果,
-//     不需要再过引擎,直接 updateOverlay 即可。
-//   * 引擎状态 pill —— 让用户一眼看到当前 block 是 mupdf/pdfium 真删
-//     还是 pdflib-overlay 兜底。
+//   * 文字内容 contenteditable -- 提交时调 useCommitTextBlock。
+//   * 字体 / 字号 / 颜色 / 行距 / 对齐 -- 只影响 flatten 阶段重画新文字
+//     的视觉效果,不需要再过引擎,直接 updateOverlay 即可。
 function TextBlockControls({
   item,
   page,
@@ -525,23 +814,19 @@ function TextBlockControls({
   page: PageMeta | null;
   updateOverlay: (id: string, patch: Partial<OverlayItem>) => void;
 }) {
-  // 文字内容用 local state 解耦,避免每次键盘输入都触发 store 更新 +
-  // 全画布 re-render;只有失焦 / Ctrl+Enter 才把变更写回 PDF。
-  const [draft, setDraft] = useState(item.text);
-  useEffect(() => {
-    // 当选中切换到别的 block,或外部有改动(画布内嵌 textarea 提交)时,
-    // 同步刷新本地草稿。
-    setDraft(item.text);
-  }, [item.id, item.text]);
-
   const { commit } = useCommitTextBlock();
-  const fontIsBuiltin = isBuiltinFont(item.font);
-  const dirty = draft !== item.text;
+  const editorRef = useRef<HTMLDivElement | null>(null);
+  const [dirty, setDirty] = useState(false);
+  const align: TextAlign = item.align || 'left';
 
   function flush() {
-    if (!dirty) return;
+    const el = editorRef.current;
+    if (!el) return;
+    const { text, segments } = extractSegments(el);
+    setDirty(false);
     if (!page) return;
-    commit({ block: item, pageIndex: page.index, newText: draft });
+    if (text === item.text && segments === undefined) return;
+    commit({ block: item, pageIndex: page.index, newText: text, segments });
   }
 
   return (
@@ -551,41 +836,33 @@ function TextBlockControls({
       </div>
 
       <div className="flex flex-col gap-2">
-        <label className="flex flex-col gap-1 text-xs text-gray-600">
-          <span className="flex items-center justify-between">
+        <div>
+          <span className="flex items-center justify-between text-xs text-gray-600">
             <span>文字内容</span>
             {dirty && (
               <span className="text-[10px] text-amber-700">未提交</span>
             )}
           </span>
-          <textarea
-            value={draft}
-            onChange={(e) => {
-              setDraft(e.target.value);
-            }}
-            onBlur={() => {
-              flush();
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-                e.preventDefault();
-                flush();
-              } else if (e.key === 'Escape') {
-                e.preventDefault();
-                setDraft(item.text);
-              }
-            }}
-            rows={3}
-            className="rounded border px-1 py-0.5"
-            placeholder="(空)"
-          />
-          <div className="flex items-center justify-between gap-2 text-[10px] text-gray-500">
+          <div className="mt-1">
+            <RichTextEditor
+              key={item.id}
+              editorRef={editorRef}
+              initialText={item.text}
+              initialSegments={item.segments}
+              font={item.font}
+              fontSize={item.fontSize}
+              color={item.color || '#000000'}
+              bold={item.bold}
+              italic={item.italic}
+              onInput={() => setDirty(true)}
+              onBlur={flush}
+            />
+          </div>
+          <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-gray-500">
             <span>提交: 失焦或 Ctrl+Enter · 取消: Esc</span>
             <button
               type="button"
-              onClick={() => {
-                flush();
-              }}
+              onClick={() => editorRef.current?.blur()}
               disabled={!dirty}
               className={clsx(
                 'rounded border px-2 py-0.5 text-[10px]',
@@ -597,32 +874,14 @@ function TextBlockControls({
               提交
             </button>
           </div>
-        </label>
+        </div>
 
         <label className="flex flex-col gap-1 text-xs text-gray-600">
           字体
-          <select
-            value={fontIsBuiltin ? item.font : 'Custom'}
-            onChange={(e) => {
-              const v = e.target.value;
-              if (v === 'Custom') {
-                const name =
-                  window.prompt('输入字体名称', item.font || 'sans-serif') ??
-                  item.font;
-                updateOverlay(item.id, { font: name } as Partial<OverlayItem>);
-              } else {
-                updateOverlay(item.id, { font: v } as Partial<OverlayItem>);
-              }
-            }}
-            className="rounded border px-1 py-0.5"
-          >
-            {BUILTIN_FONTS.map((f) => (
-              <option key={f} value={f}>
-                {f}
-              </option>
-            ))}
-            <option value="Custom">Custom…</option>
-          </select>
+          <FontSelector
+            value={item.font}
+            onChange={(font) => updateOverlay(item.id, { font } as Partial<OverlayItem>)}
+          />
         </label>
 
         <label className="flex flex-col gap-1 text-xs text-gray-600">
@@ -676,21 +935,12 @@ function TextBlockControls({
           />
         </label>
 
+        {/* Phase 4: alignment buttons */}
         <div className="flex items-center gap-1">
-          <ToggleButton
-            active={!!item.bold}
-            onClick={() => updateOverlay(item.id, { bold: !item.bold } as Partial<OverlayItem>)}
-            title="粗体"
-          >
-            <b>B</b>
-          </ToggleButton>
-          <ToggleButton
-            active={!!item.italic}
-            onClick={() => updateOverlay(item.id, { italic: !item.italic } as Partial<OverlayItem>)}
-            title="斜体"
-          >
-            <i>I</i>
-          </ToggleButton>
+          <AlignButtonGroup
+            align={align}
+            onChange={(a) => updateOverlay(item.id, { align: a } as Partial<OverlayItem>)}
+          />
         </div>
       </div>
     </div>

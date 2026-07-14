@@ -13,7 +13,7 @@ import { PDFDocument, PDFPage, rgb } from 'pdf-lib';
 import type { PDFFont } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import type { PageMeta, TextBlockItem } from '../types';
-import { hexToRgb, pickStandardFont } from './helpers';
+import { hexToRgb, pickStandardFont, wrapText, alignedX } from './helpers';
 import { loadCjkFontBytes, containsNonAscii } from './cjkFont';
 import { collectWhiteoutQuads, type Quad } from './textQuad';
 
@@ -44,7 +44,12 @@ export async function applyTextBlockEdits(
   let cjkFont: PDFFont | null = null;
   let cjkFontAttempted = false;
 
-  async function getFont(text: string, bold: boolean, italic: boolean): Promise<{ font: PDFFont; safe: string }> {
+  async function getFont(
+    text: string,
+    bold: boolean,
+    italic: boolean,
+    fontName = 'Helvetica'
+  ): Promise<{ font: PDFFont; safe: string }> {
     const needsCjk = containsNonAscii(text);
     if (needsCjk) {
       if (!cjkFontAttempted) {
@@ -58,7 +63,7 @@ export async function applyTextBlockEdits(
       if (cjkFont) {
         return { font: cjkFont, safe: text };
       }
-      const fallbackName = pickStandardFont('Helvetica', bold, italic);
+      const fallbackName = pickStandardFont(fontName, bold, italic);
       let f = fontCache.get(fallbackName);
       if (!f) {
         f = await doc.embedFont(fallbackName);
@@ -70,7 +75,7 @@ export async function applyTextBlockEdits(
       }
       return { font: f, safe };
     }
-    const name = pickStandardFont('Helvetica', bold, italic);
+    const name = pickStandardFont(fontName, bold, italic);
     let f = fontCache.get(name);
     if (!f) {
       f = await doc.embedFont(name);
@@ -83,11 +88,8 @@ export async function applyTextBlockEdits(
     const editorPageIndex = pages.findIndex((p) => p.id === block.pageId);
     if (editorPageIndex < 0) continue;
     const meta = pages[editorPageIndex];
-    // 原始 PDF 页码(1-based for pdfjs/mupdf, 0-based for pdf-lib).
-    // meta.index 是 0-based 原始页码;collectWhiteoutQuads 用 0-based。
     const originalPageIndex = meta.isBlank ? -1 : meta.index;
     if (originalPageIndex < 0) {
-      // 空白页上不应该有 text-block,跳过。
       continue;
     }
 
@@ -96,18 +98,18 @@ export async function applyTextBlockEdits(
     const { r, g, b } = hexToRgb(block.color || '#000000');
     const white = rgb(1, 1, 1);
     const fontSize = Math.max(block.fontSize, 6);
+    const lineHeight = block.lineHeight || 1.2;
+    const align = block.align || 'left';
+    const lineStep = fontSize * lineHeight;
 
     // (1) 收集原字字符 quad(从干净原 PDF,在 originalBbox 位置)。
-    //     originalBbox 是检测时的原始位置,原字在那里;移动后 bbox !=
-    //     originalBbox,白底要盖旧位置,新字画在新 bbox 位置。
     const quads: Quad[] = await collectWhiteoutQuads(
       new Uint8Array(originalBytes),
       originalPageIndex,
       block.originalBbox
     );
 
-    // (2) 按字符 quad 画白底。stext 给出 y-down 顶左坐标系,
-    // pdf-lib drawRectangle 用 y-up 底左。
+    // (2) 按字符 quad 画白底。
     for (const q of quads) {
       const padY = Math.max(1, q.h * 0.1);
       const padX = 0.5;
@@ -123,53 +125,181 @@ export async function applyTextBlockEdits(
       });
     }
 
-    // (3) 画新字。多行按 lineHeight 间距分别 drawText。
+    // (3) 画新字。
     if (!block.text) continue;
-    const { font, safe } = await getFont(block.text, block.bold, block.italic);
-    const lineStep = fontSize * (block.lineHeight || 1.2);
-    const drawAllLines = (f: PDFFont, text: string) => {
-      const textLines = text.split('\n');
-      for (let li = 0; li < textLines.length; li++) {
-        const y = pageHeight - block.bbox.y - fontSize - li * lineStep;
-        page.drawText(textLines[li], {
-          x: block.bbox.x,
-          y,
-          size: fontSize,
-          font: f,
-          color: rgb(r, g, b),
-          maxWidth: block.bbox.w,
-        });
+
+    if (block.segments && block.segments.length > 0) {
+      // Phase 6: draw segments sequentially with per-line alignment.
+      type SegInfo = {
+        text: string;
+        font: PDFFont;
+        width: number;
+        color: string;
+      };
+      const lines: SegInfo[][] = [[]];
+
+      for (const seg of block.segments) {
+        const segBold = seg.bold ?? block.bold;
+        const segItalic = seg.italic ?? block.italic;
+        const segColor = seg.color || block.color;
+        const parts = seg.text.split('\n');
+        for (let pi = 0; pi < parts.length; pi++) {
+          if (pi > 0) lines.push([]);
+          const partText = parts[pi];
+          if (partText) {
+            try {
+              const { font, safe } = await getFont(
+                partText,
+                segBold,
+                segItalic,
+                block.font
+              );
+              const width = font.widthOfTextAtSize(safe, fontSize);
+              lines[lines.length - 1].push({
+                text: safe,
+                font,
+                width,
+                color: segColor,
+              });
+            } catch (err) {
+              console.warn(
+                '[textBlockEdits] segment getFont 失败,跳过 segment:',
+                err
+              );
+            }
+          }
+        }
       }
-    };
-    try {
-      drawAllLines(font, safe);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        '[textBlockEdits] drawText 失败,用 ? 兜底重试 block %s:',
-        block.id,
-        err
-      );
+
       try {
-        const fallbackName = pickStandardFont('Helvetica', false, false);
-        let fb = fontCache.get(fallbackName);
-        if (!fb) {
-          fb = await doc.embedFont(fallbackName);
-          fontCache.set(fallbackName, fb);
+        for (let li = 0; li < lines.length; li++) {
+          const segs = lines[li];
+          if (segs.length === 0) continue;
+          const totalW = segs.reduce((sum, s) => sum + s.width, 0);
+          let x = alignedX(align, block.bbox.x, block.bbox.w, totalW);
+          const y =
+            pageHeight - block.bbox.y - fontSize - li * lineStep;
+          for (const s of segs) {
+            const { r: sr, g: sg, b: sb } = hexToRgb(s.color);
+            page.drawText(s.text, {
+              x,
+              y,
+              size: fontSize,
+              font: s.font,
+              color: rgb(sr, sg, sb),
+            });
+            x += s.width;
+          }
         }
-        let safeAscii = '';
-        for (const ch of safe) {
-          safeAscii += (ch.codePointAt(0) ?? 0) > 0x7e ? '?' : ch;
-        }
-        drawAllLines(fb, safeAscii);
-      } catch (err2) {
-        // eslint-disable-next-line no-console
-        console.error(
-          '[textBlockEdits] 兜底 drawText 也失败,跳过 block %s:',
+      } catch (err) {
+        console.warn(
+          '[textBlockEdits] segments drawText 失败,用 ? 兜底重试 block %s:',
           block.id,
-          err2
+          err
+        );
+        await fallbackDrawText(
+          doc,
+          fontCache,
+          page,
+          pageHeight,
+          block,
+          fontSize,
+          lineStep,
+          align,
+          rgb(r, g, b)
+        );
+      }
+    } else {
+      // No segments: wrap + align + multi-line.
+      const { font, safe } = await getFont(
+        block.text,
+        block.bold,
+        block.italic,
+        block.font
+      );
+
+      const drawAllLines = (f: PDFFont, text: string) => {
+        const wrappedLines = wrapText(f, text, block.bbox.w, fontSize);
+        for (let li = 0; li < wrappedLines.length; li++) {
+          const lineW = f.widthOfTextAtSize(wrappedLines[li], fontSize);
+          const x = alignedX(align, block.bbox.x, block.bbox.w, lineW);
+          const y =
+            pageHeight - block.bbox.y - fontSize - li * lineStep;
+          page.drawText(wrappedLines[li], {
+            x,
+            y,
+            size: fontSize,
+            font: f,
+            color: rgb(r, g, b),
+          });
+        }
+      };
+
+      try {
+        drawAllLines(font, safe);
+      } catch (err) {
+        console.warn(
+          '[textBlockEdits] drawText 失败,用 ? 兜底重试 block %s:',
+          block.id,
+          err
+        );
+        await fallbackDrawText(
+          doc,
+          fontCache,
+          page,
+          pageHeight,
+          block,
+          fontSize,
+          lineStep,
+          align,
+          rgb(r, g, b)
         );
       }
     }
+  }
+}
+
+/** Fallback: draw with Helvetica and '?' for non-ASCII characters. */
+async function fallbackDrawText(
+  doc: PDFDocument,
+  fontCache: Map<string, PDFFont>,
+  page: PDFPage,
+  pageHeight: number,
+  block: TextBlockItem,
+  fontSize: number,
+  lineStep: number,
+  align: 'left' | 'center' | 'right',
+  color: ReturnType<typeof rgb>
+): Promise<void> {
+  try {
+    const fallbackName = pickStandardFont('Helvetica', false, false);
+    let fb = fontCache.get(fallbackName);
+    if (!fb) {
+      fb = await doc.embedFont(fallbackName);
+      fontCache.set(fallbackName, fb);
+    }
+    let safeAscii = '';
+    for (const ch of block.text) {
+      safeAscii += (ch.codePointAt(0) ?? 0) > 0x7e ? '?' : ch;
+    }
+    const wrappedLines = wrapText(fb, safeAscii, block.bbox.w, fontSize);
+    for (let li = 0; li < wrappedLines.length; li++) {
+      const lineW = fb.widthOfTextAtSize(wrappedLines[li], fontSize);
+      const x = alignedX(align, block.bbox.x, block.bbox.w, lineW);
+      const y = pageHeight - block.bbox.y - fontSize - li * lineStep;
+      page.drawText(wrappedLines[li], {
+        x,
+        y,
+        size: fontSize,
+        font: fb,
+        color,
+      });
+    }
+  } catch (err2) {
+    console.error(
+      '[textBlockEdits] 兜底 drawText 也失败,跳过 block %s:',
+      block.id,
+      err2
+    );
   }
 }

@@ -11,6 +11,16 @@ export type Tool =
   | 'signature'
   | 'form';
 
+/** Rich-text segment for inline styling within a text element. */
+export interface RichTextSegment {
+  text: string;
+  bold?: boolean;
+  italic?: boolean;
+  color?: string;
+}
+
+export type TextAlign = 'left' | 'center' | 'right';
+
 export interface PageMeta {
   id: string;
   index: number;
@@ -61,6 +71,12 @@ export interface TextItem extends OverlayBase {
   bold: boolean;
   italic: boolean;
   underline: boolean;
+  /** Text alignment within the text box. Defaults to 'left'. */
+  align?: TextAlign;
+  /** Line height multiplier. Defaults to 1.2. */
+  lineHeight?: number;
+  /** Optional rich-text segments. When absent, the whole text uses bold/italic/color. */
+  segments?: RichTextSegment[];
 }
 
 // F4
@@ -99,6 +115,10 @@ export interface TextBlockItem extends OverlayBase {
   lineHeight: number;
   bold: boolean;
   italic: boolean;
+  /** Text alignment within the block. Defaults to 'left'. */
+  align?: TextAlign;
+  /** Optional rich-text segments. When absent, the whole text uses bold/italic/color. */
+  segments?: RichTextSegment[];
 }
 
 // F11

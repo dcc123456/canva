@@ -72,10 +72,11 @@ function detectTextBlocksImpl(
       for (const block of json.blocks) {
         if (block.type !== 'text' || !block.lines) continue;
         for (const line of block.lines) {
-          const text = (line.text ?? '')
-            .replace(/[\r\n\t\v\f]+/g, '')
-            .trim();
-          if (!text) continue;
+          // WYSIWYG: 只去掉换行/制表等控制符,保留普通空格(含行首/行尾)。
+          // 原来的 .trim() 会把 PDF 中真实存在的行首/行尾空格抹掉,
+          // 导致编辑模式看到的文字和 pdfjs 渲染不一致。
+          const text = (line.text ?? '').replace(/[\r\n\t\v\f]+/g, '');
+          if (!text.trim()) continue;
           const baseline = (line.y ?? line.bbox.y + line.bbox.h) | 0;
           const fi = line.font;
           const fName = (fi?.name ?? fi?.family ?? 'embedded');
@@ -133,7 +134,9 @@ function detectTextBlocksImpl(
       }
       for (const line of lines) {
         line.atoms.sort((a, b) => a.bbox.x - b.bbox.x);
-        line.text = line.atoms.map((a) => a.text).join('').trim();
+        // WYSIWYG: atoms 已包含 MuPDF span 自带的空格,直接拼接即可,
+        // 不再 trim -- 保留行首/行尾真实空格。
+        line.text = line.atoms.map((a) => a.text).join('');
         line.x = Math.min(...line.atoms.map((a) => a.bbox.x));
         const maxR = Math.max(...line.atoms.map((a) => a.bbox.x + a.bbox.w));
         line.w = maxR - line.x;
@@ -168,7 +171,10 @@ function detectTextBlocksImpl(
       }
       const blocks: TextBlock[] = [];
       paragraphs.forEach((para, idx) => {
-        const text = para.lines.map((l) => l.text).join('\n').trim();
+        // WYSIWYG: 保留段落首尾真实空格,不再 trim。
+        // 每行已在上面用 `if (!text.trim()) continue` 过滤掉纯空白行,
+        // 所以段落里至少有一行非空白文字。
+        const text = para.lines.map((l) => l.text).join('\n');
         if (!text) return;
         const minX = Math.min(...para.lines.map((l) => l.x));
         const minY = Math.min(...para.lines.map((l) => l.y));

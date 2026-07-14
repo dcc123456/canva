@@ -38,7 +38,7 @@ function findClosestZoom(target: number, base: readonly number[] = ZOOM_LEVELS):
 export const useEditorStore = create<EditorState>((set, get) => ({
   currentPageIndex: 0,
   zoom: 1,
-  tool: 'select',
+  tool: 'edit-text',
   totalPages: 0,
   selectedOverlayId: null,
 

@@ -1,7 +1,7 @@
 // features/text-edit/useCommitTextBlock.ts
 //
 // 共享的"把 text-block 的新文字写回"逻辑,被 TextBlockEditLayer(画布
-// 上的浮层 textarea)和 Inspector(右侧属性面板的文字内容输入框)同时
+// 上的浮层编辑器)和 Inspector(右侧属性面板的文字内容输入框)同时
 // 调用。
 //
 // 重构后:编辑只更新 overlay,绝不碰 store.pdfBytes。原 PDF 字节始终
@@ -12,12 +12,14 @@
 //   * 撤销/重做只记录 overlay patch
 import { useCallback } from 'react';
 import { useDocumentStore } from '../../store/documentStore';
-import type { TextBlockItem } from '../../core/types';
+import type { TextBlockItem, RichTextSegment } from '../../core/types';
 
 export interface CommitOptions {
   block: TextBlockItem;
   pageIndex: number;
   newText: string;
+  /** Optional rich-text segments from the contenteditable editor. */
+  segments?: RichTextSegment[];
 }
 
 export interface UseCommitTextBlockReturn {
@@ -29,13 +31,19 @@ export function useCommitTextBlock(): UseCommitTextBlockReturn {
   const updateOverlay = useDocumentStore((s) => s.updateOverlay);
 
   const commit = useCallback(
-    ({ block, newText }: CommitOptions): boolean => {
-      if (newText === block.text) {
+    ({ block, newText, segments }: CommitOptions): boolean => {
+      if (newText === block.text && segments === undefined) {
         return true;
       }
-      updateOverlay(block.id, {
-        text: newText,
-      } as Partial<TextBlockItem>);
+      const patch: Partial<TextBlockItem> = { text: newText };
+      if (segments !== undefined) {
+        // Only store segments if they contain actual formatting.
+        const hasFormatting = segments.some(
+          (s) => s.bold || s.italic || s.color
+        );
+        patch.segments = hasFormatting ? segments : undefined;
+      }
+      updateOverlay(block.id, patch as Partial<TextBlockItem>);
       return true;
     },
     [updateOverlay]
