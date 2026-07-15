@@ -16,7 +16,11 @@ export interface RichTextSegment {
   text: string;
   bold?: boolean;
   italic?: boolean;
+  underline?: boolean;
+  strike?: boolean;
   color?: string;
+  fontSize?: number;
+  fontFamily?: string;
 }
 
 export type TextAlign = 'left' | 'center' | 'right';
@@ -119,6 +123,8 @@ export interface TextBlockItem extends OverlayBase {
   align?: TextAlign;
   /** Optional rich-text segments. When absent, the whole text uses bold/italic/color. */
   segments?: RichTextSegment[];
+  /** Segments snapshot at detection time. Used to detect user edits to styling. */
+  originalSegments?: RichTextSegment[];
 }
 
 // F11

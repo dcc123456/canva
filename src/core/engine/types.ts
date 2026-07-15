@@ -7,7 +7,7 @@
 //
 // 引擎路由(core/engine/router.ts)仍按 mupdf > pdfium > pdflib-overlay
 // 优先级选择,用于 detectTextBlocks / parseFormFields。
-import type { Rect } from '../types';
+import type { Rect, RichTextSegment } from '../types';
 
 export type EngineKind = 'mupdf' | 'pdflib-overlay' | 'pdfium';
 
@@ -21,6 +21,10 @@ export interface TextBlock {
   lineHeight: number;
   bold: boolean;
   italic: boolean;
+  /** Per-line rich-text segments (preserves mixed bold/italic within a block). */
+  segments?: RichTextSegment[];
+  /** Text alignment detected from line position. */
+  align?: 'left' | 'center' | 'right';
 }
 
 export type FormFieldKind =

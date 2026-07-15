@@ -152,7 +152,7 @@ async function detectTextBlocksImpl(
     // WYSIWYG: 按几何位置拼字,保留 PDF 中真实的多空格和行首/行尾空格,
     // 不再 collapse / trim -- 这样编辑模式看到的文字和 pdfjs 渲染一致。
     const text = joinItemsPreservingSpaces(line.items);
-    if (!text.trim()) continue;
+    if (text.length === 0) continue;
     lineInfos.push({
       baseline: line.y,
       rect,

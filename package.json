@@ -16,6 +16,12 @@
   "dependencies": {
     "@embedpdf/pdfium": "^2.14.4",
     "@pdf-lib/fontkit": "^1.1.1",
+    "@tiptap/extension-color": "^3.27.4",
+    "@tiptap/extension-font-family": "^3.27.4",
+    "@tiptap/extension-text-style": "^3.27.4",
+    "@tiptap/extension-underline": "^3.27.4",
+    "@tiptap/react": "^3.27.4",
+    "@tiptap/starter-kit": "^3.27.4",
     "clsx": "^2.1.1",
     "immer": "^11.1.8",
     "mupdf": "^1.27.0",

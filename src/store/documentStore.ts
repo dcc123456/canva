@@ -13,6 +13,8 @@ export interface DocumentState {
   overlays: OverlayItem[];
   pdfBytes: Uint8Array | null;
   pdfName: string;
+  /** Per-page background color (hex), sampled from the rendered canvas. */
+  pageBgColors: Record<string, string>;
 
   setPages: (pages: PageMeta[]) => void;
   addPage: (page?: Partial<PageMeta>) => void;
@@ -20,11 +22,14 @@ export interface DocumentState {
   setPdfBytes: (bytes: Uint8Array | null) => void;
   setPdfName: (name: string) => void;
   setOverlays: (overlays: OverlayItem[]) => void;
+  setPageBgColor: (pageId: string, color: string) => void;
 
   addOverlay: (overlay: OverlayItem) => void;
   updateOverlay: (id: string, patch: Partial<OverlayItem>) => void;
   removeOverlay: (id: string) => void;
   clearOverlays: () => void;
+  /** Shift multiple overlays' bbox.y in one history step (reflow). */
+  shiftBlocks: (shifts: Array<{ id: string; dy: number }>) => void;
 }
 
 function defaultA4Page(index: number): PageMeta {
@@ -69,6 +74,7 @@ export const useDocumentStore = create<DocumentState>((set) => ({
   overlays: [],
   pdfBytes: null,
   pdfName: '',
+  pageBgColors: {},
 
   setPages: (pages) =>
     applyWithHistory(set, (draft) => {
@@ -76,6 +82,10 @@ export const useDocumentStore = create<DocumentState>((set) => ({
       const pageIds = new Set(pages.map((p) => p.id));
       draft.overlays = draft.overlays.filter((o) => pageIds.has(o.pageId));
     }),
+
+  setPageBgColor: (pageId, color) =>
+    // No history: bgColor detection is metadata, not a user action.
+    set((state) => ({ pageBgColors: { ...state.pageBgColors, [pageId]: color } })),
 
   addPage: (page) =>
     applyWithHistory(set, (draft) => {
@@ -142,5 +152,17 @@ export const useDocumentStore = create<DocumentState>((set) => ({
   clearOverlays: () =>
     applyWithHistory(set, (draft) => {
       draft.overlays = [];
+    }),
+
+  shiftBlocks: (shifts) =>
+    applyWithHistory(set, (draft) => {
+      for (const { id, dy } of shifts) {
+        const idx = draft.overlays.findIndex((o) => o.id === id);
+        if (idx === -1) continue;
+        const ov = draft.overlays[idx];
+        if (ov.type === 'text-block' || ov.type === 'form-field') {
+          ov.bbox = { ...ov.bbox, y: ov.bbox.y + dy };
+        }
+      }
     }),
 }));

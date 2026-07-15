@@ -5,6 +5,7 @@ import { useRef, type PointerEvent as ReactPointerEvent } from 'react';
 import type { ImageItem, OverlayItem } from '../../core/types';
 import { useDocumentStore } from '../../store/documentStore';
 import { useEditorStore } from '../../store/editorStore';
+import { pushDownSubsequentBlocks } from '../text-edit/reflow';
 
 type Handle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'rotate';
 
@@ -175,11 +176,24 @@ export function SelectionFrame({ overlay, zoom }: SelectionFrameProps) {
   }
 
   function endDrag(e: ReactPointerEvent<SVGElement>) {
+    const s = startRef.current;
     startRef.current = null;
     try {
       (e.target as Element).releasePointerCapture(e.pointerId);
     } catch {
       /* ignore */
+    }
+    // Phase D: trigger inter-block reflow when a text-block is resized.
+    if (s && overlay.type === 'text-block') {
+      const current = useDocumentStore
+        .getState()
+        .overlays.find((o) => o.id === overlay.id);
+      if (current && current.type === 'text-block') {
+        const deltaH = current.bbox.h - s.box.h;
+        if (Math.abs(deltaH) > 0.5) {
+          pushDownSubsequentBlocks(overlay.pageId, overlay.id, deltaH);
+        }
+      }
     }
   }
 

@@ -110,7 +110,7 @@ export async function flattenOverlays(
         break;
       }
       case 'text-block': {
-        // text-block 由 applyTextBlockEdits 统一处理(已编辑的白底+重画,
+        // text-block 由 applyTextBlockRedraws 统一处理(redact 删字 + 重画新字,
         // 未编辑的原字已在 PDF 里)。flatten 阶段跳过。
         break;
       }

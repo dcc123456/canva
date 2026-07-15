@@ -18,3 +18,20 @@ html.dark body {
   background: #0f172a;
   color: #e5e7eb;
 }
+
+/* TipTap / ProseMirror editor: reset paragraph margins so the editing
+   surface matches the compact PDF text-block layout.
+   white-space: pre-wrap ensures multiple spaces are displayed. */
+.tiptap-edit-area .ProseMirror {
+  outline: none;
+  height: 100%;
+  overflow: auto;
+  white-space: pre-wrap;
+  tab-size: 4;
+}
+.tiptap-edit-area .ProseMirror p,
+.tiptap-edit-area .ProseMirror span {
+  margin: 0;
+  white-space: pre-wrap;
+  tab-size: 4;
+}

@@ -16,6 +16,7 @@ import type {
   ParseFormFieldsOptions,
   TextBlock,
 } from '../engine/types';
+import type { RichTextSegment } from '../types';
 import { pdfLibFallbackEngine as pdfLibFallback } from '../engine/pdfLibFallback';
 import { loadMupdf, type MupdfNs } from './loader';
 
@@ -72,11 +73,10 @@ function detectTextBlocksImpl(
       for (const block of json.blocks) {
         if (block.type !== 'text' || !block.lines) continue;
         for (const line of block.lines) {
-          // WYSIWYG: 只去掉换行/制表等控制符,保留普通空格(含行首/行尾)。
-          // 原来的 .trim() 会把 PDF 中真实存在的行首/行尾空格抹掉,
-          // 导致编辑模式看到的文字和 pdfjs 渲染不一致。
-          const text = (line.text ?? '').replace(/[\r\n\t\v\f]+/g, '');
-          if (!text.trim()) continue;
+          // WYSIWYG: 保留普通空格和制表符(\t),只去掉换行/控制符。
+          // \t 在 PDF 中是合法的行内空白,必须保留。
+          const text = (line.text ?? '').replace(/[\r\n\v\f]+/g, '');
+          if (text.length === 0) continue;
           const baseline = (line.y ?? line.bbox.y + line.bbox.h) | 0;
           const fi = line.font;
           const fName = (fi?.name ?? fi?.family ?? 'embedded');
@@ -109,6 +109,8 @@ function detectTextBlocksImpl(
         font: string;
         bold: boolean;
         italic: boolean;
+        align?: 'left' | 'center' | 'right';
+        isHeading?: boolean;
       }
       const lines: Line[] = [];
       for (const atom of atoms) {
@@ -148,7 +150,39 @@ function detectTextBlocksImpl(
         line.bold = line.atoms[0].bold;
         line.italic = line.atoms[0].italic;
       }
-      // 按段落聚类:相邻行(x 范围重叠 + 行间距合理 + 字号相近)合并
+      // Compute page content area and median font size for alignment/heading detection.
+      const allLefts = lines.map((l) => l.x);
+      const allRights = lines.map((l) => l.x + l.w);
+      const leftEdge = allLefts.length > 0 ? Math.min(...allLefts) : 0;
+      const rightEdge = allRights.length > 0 ? Math.max(...allRights) : 0;
+      const contentCenter = (leftEdge + rightEdge) / 2;
+      const contentWidth = Math.max(1, rightEdge - leftEdge);
+      const alignTol = contentWidth * 0.05;
+      const sortedSizes = lines.map((l) => l.size).sort((a, b) => a - b);
+      const medianSize = sortedSizes.length > 0
+        ? sortedSizes[Math.floor(sortedSizes.length / 2)]
+        : 12;
+
+      // Detect alignment and heading status for each line.
+      for (const line of lines) {
+        const lineLeft = line.x;
+        const lineRight = line.x + line.w;
+        const lineCenter = line.x + line.w / 2;
+        const isLeft = Math.abs(lineLeft - leftEdge) <= alignTol;
+        const isRight = Math.abs(lineRight - rightEdge) <= alignTol;
+        const isCenter = Math.abs(lineCenter - contentCenter) <= alignTol;
+        if (isCenter && !isLeft && !isRight) {
+          line.align = 'center';
+        } else if (isRight && !isLeft) {
+          line.align = 'right';
+        } else {
+          line.align = 'left';
+        }
+        // Heading: font size significantly larger than median.
+        line.isHeading = line.size > medianSize * 1.5;
+      }
+
+      // 按段落聚类:相邻行(x 范围重叠 + 行间距合理 + 字号相近 + 对齐一致)合并
       interface Paragraph { lines: Line[] }
       const paragraphs: Paragraph[] = [];
       for (const line of lines) {
@@ -162,7 +196,10 @@ function detectTextBlocksImpl(
           const xOverlap = line.x < prev.x + prev.w && line.x + line.w > prev.x;
           const spacingOk = baselineDiff >= minSize * 0.8 && baselineDiff <= maxSize * 3.0;
           const sizeOk = maxSize / minSize <= 1.3;
-          if (xOverlap && spacingOk && sizeOk) {
+          // Split when alignment differs or heading boundary crossed.
+          const alignOk = (line.align || 'left') === (prev.align || 'left');
+          const headingOk = !!line.isHeading === !!prev.isHeading;
+          if (xOverlap && spacingOk && sizeOk && alignOk && headingOk) {
             last.lines.push(line);
             continue;
           }
@@ -190,6 +227,43 @@ function detectTextBlocksImpl(
           const avgDiff = diffs.reduce((a, b) => a + b, 0) / diffs.length;
           lineHeight = avgDiff / head.size;
         }
+        // Build per-atom segments to preserve style changes at the font-run
+        // level. MuPDF's preserve-spans splits different fonts into separate
+        // lines (atoms), so each atom has a single consistent font/bold/italic/size.
+        // \n is only added between different baselines (actual line breaks),
+        // not between atoms on the same visual line.
+        const rawSegs: RichTextSegment[] = [];
+        para.lines.forEach((line, li) => {
+          if (li > 0) rawSegs.push({ text: '\n' });
+          for (const atom of line.atoms) {
+            const seg: RichTextSegment = { text: atom.text };
+            if (atom.bold) seg.bold = true;
+            if (atom.italic) seg.italic = true;
+            if (atom.font) seg.fontFamily = atom.font;
+            if (atom.size) seg.fontSize = Math.round(atom.size * 100) / 100;
+            rawSegs.push(seg);
+          }
+        });
+        // Merge adjacent segments with identical style to reduce fragmentation.
+        const segs: RichTextSegment[] = [];
+        for (const seg of rawSegs) {
+          const last = segs[segs.length - 1];
+          if (
+            last &&
+            !!last.bold === !!seg.bold &&
+            !!last.italic === !!seg.italic &&
+            (last.fontFamily || '') === (seg.fontFamily || '') &&
+            (last.fontSize ?? 0) === (seg.fontSize ?? 0)
+          ) {
+            last.text += seg.text;
+          } else {
+            segs.push({ ...seg });
+          }
+        }
+
+        // Use the first line's alignment for the whole block.
+        const blockAlign = head.align || 'left';
+
         blocks.push({
           id: `tb-${pageIndex}-${idx}`,
           bbox: {
@@ -205,6 +279,8 @@ function detectTextBlocksImpl(
           lineHeight: Math.max(0.5, Math.round(lineHeight * 100) / 100),
           bold: head.bold,
           italic: head.italic,
+          segments: segs,
+          align: blockAlign,
         });
       });
       return blocks;

@@ -1,5 +1,6 @@
 // ElementRenderer: dispatches SVG rendering for each overlay item type.
 import type { OverlayItem, RichTextSegment } from '../../core/types';
+import { useDocumentStore } from '../../store/documentStore';
 
 export interface ElementRendererProps {
   overlay: OverlayItem;
@@ -10,26 +11,37 @@ export interface ElementRendererProps {
 function renderSegments(
   segments: RichTextSegment[] | undefined,
   text: string,
-  color: string
+  color: string,
+  fontFamily: string
 ) {
   if (!segments || segments.length === 0) {
     return text;
   }
-  return segments.map((s, i) => (
-    <span
-      key={i}
-      style={{
-        fontWeight: s.bold ? 700 : 400,
-        fontStyle: s.italic ? 'italic' : 'normal',
-        color: s.color || color,
-      }}
-    >
-      {s.text}
-    </span>
-  ));
+  return segments.map((s, i) => {
+    const decos: string[] = [];
+    if (s.underline) decos.push('underline');
+    if (s.strike) decos.push('line-through');
+    return (
+      <span
+        key={i}
+        style={{
+          fontWeight: s.bold ? 700 : 400,
+          fontStyle: s.italic ? 'italic' : 'normal',
+          textDecoration: decos.length > 0 ? decos.join(' ') : 'none',
+          color: s.color || color,
+          fontSize: s.fontSize ? `${s.fontSize}px` : undefined,
+          fontFamily: s.fontFamily || fontFamily,
+        }}
+      >
+        {s.text}
+      </span>
+    );
+  });
 }
 
 export function ElementRenderer({ overlay, selected = false }: ElementRendererProps) {
+  const pageBgColor =
+    useDocumentStore((s) => s.pageBgColors[overlay.id]) || '#ffffff';
   switch (overlay.type) {
     case 'highlight': {
       return (
@@ -121,6 +133,7 @@ export function ElementRenderer({ overlay, selected = false }: ElementRendererPr
                 textAlign: align,
                 lineHeight: String(lh),
                 whiteSpace: 'pre-wrap',
+                tabSize: 4,
                 wordBreak: 'break-word',
                 overflow: 'hidden',
                 boxSizing: 'border-box',
@@ -128,7 +141,7 @@ export function ElementRenderer({ overlay, selected = false }: ElementRendererPr
                 padding: 0,
               }}
             >
-              {renderSegments(overlay.segments, overlay.text, overlay.color)}
+              {renderSegments(overlay.segments, overlay.text, overlay.color, overlay.font)}
             </div>
           </foreignObject>
         </g>
@@ -172,7 +185,14 @@ export function ElementRenderer({ overlay, selected = false }: ElementRendererPr
         overlay.bbox.y !== overlay.originalBbox.y ||
         overlay.bbox.w !== overlay.originalBbox.w ||
         overlay.bbox.h !== overlay.originalBbox.h;
-      const edited = overlay.text !== overlay.originalText || moved;
+      // Detect styling changes: if segments differ from the detection-time
+      // snapshot (originalSegments), the user applied/changed bold/italic/color.
+      const segsChanged =
+        overlay.originalSegments != null
+          ? JSON.stringify(overlay.segments ?? []) !==
+            JSON.stringify(overlay.originalSegments)
+          : (overlay.segments != null && overlay.segments.length > 0);
+      const edited = overlay.text !== overlay.originalText || moved || segsChanged;
       const showOverlay = edited || selected;
       const lh = overlay.lineHeight || 1.2;
       const align = overlay.align || 'left';
@@ -185,7 +205,7 @@ export function ElementRenderer({ overlay, selected = false }: ElementRendererPr
               y={overlay.originalBbox.y}
               width={overlay.originalBbox.w}
               height={overlay.originalBbox.h}
-              fill="white"
+              fill={pageBgColor}
               pointerEvents="none"
             />
           )}
@@ -230,7 +250,7 @@ export function ElementRenderer({ overlay, selected = false }: ElementRendererPr
                   padding: 0,
                 }}
               >
-                {renderSegments(overlay.segments, overlay.text, overlay.color)}
+                {renderSegments(overlay.segments, overlay.text, overlay.color, overlay.font)}
               </div>
             </foreignObject>
           )}

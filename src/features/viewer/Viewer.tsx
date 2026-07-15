@@ -100,6 +100,38 @@ export function Viewer({ doc }: ViewerProps) {
           scale: zoom,
           rotation: overlayPage.rotation,
         });
+        // Sample background color per text-block from the rendered canvas.
+        // Samples just OUTSIDE each block's top-left corner to get the local
+        // background (may differ from page background for colored boxes).
+        if (overlayPage) {
+          const ctx = canvasRef.current.getContext('2d');
+          if (ctx) {
+            const dpr = window.devicePixelRatio || 1;
+            const store = useDocumentStore.getState();
+            const blockOverlays = store.overlays.filter(
+              (o) => o.type === 'text-block' && o.pageId === overlayPage.id
+            );
+            for (const o of blockOverlays) {
+              if (o.type !== 'text-block') continue;
+              // Sample 2px above-left of the block's originalBbox (local bg).
+              const cssX = (o.originalBbox.x - 2) * zoom;
+              const cssY = (o.originalBbox.y - 2) * zoom;
+              const deviceX = Math.max(0, Math.round(cssX * dpr));
+              const deviceY = Math.max(0, Math.round(cssY * dpr));
+              try {
+                const px = ctx.getImageData(deviceX, deviceY, 1, 1).data;
+                const hex =
+                  '#' +
+                  [px[0], px[1], px[2]]
+                    .map((v) => v.toString(16).padStart(2, '0'))
+                    .join('');
+                store.setPageBgColor(o.id, hex);
+              } catch {
+                /* tainted canvas or out of bounds; skip */
+              }
+            }
+          }
+        }
       } catch (err) {
         if (err instanceof Error && /cancelled/i.test(err.message)) return;
         throw err;
