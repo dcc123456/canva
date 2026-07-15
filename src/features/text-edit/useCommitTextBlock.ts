@@ -39,7 +39,7 @@ export function useCommitTextBlock(): UseCommitTextBlockReturn {
       if (segments !== undefined) {
         // Only store segments if they contain actual formatting.
         const hasFormatting = segments.some(
-          (s) => s.bold || s.italic || s.color
+          (s) => s.bold || s.italic || s.color || s.fontSize || s.fontFamily || s.underline || s.strike
         );
         patch.segments = hasFormatting ? segments : undefined;
       }

@@ -94,8 +94,9 @@ function detectTextBlocksImpl(
           });
         }
       }
-      // 按 baseline 聚类:同行 span (baseline 差 < 字号/2) 拼到一起,
-      // 组内按 x 排序,得到"一行一个 block"的语义。
+      // 按 baseline 聚类:同行 span (baseline 差 < 字号/2) 拼到一起。
+      // 同行两个 atom 之间水平间距 > 平均字符宽度的 3 倍时拆分,
+      // 阈值基于实际字符宽度而非写死的字号倍数。
       atoms.sort((a, b) => a.baseline - b.baseline || a.bbox.x - b.bbox.x);
       interface Line {
         baseline: number;
@@ -112,12 +113,39 @@ function detectTextBlocksImpl(
         align?: 'left' | 'center' | 'right';
         isHeading?: boolean;
       }
+      // 计算平均字符宽度:用所有 atom 的 text 长度 / bbox 宽度。
+      function avgCharWidth(at: AtomLine): number {
+        const charCount = [...(at.text || ' ')].length;
+        return charCount > 0 ? at.bbox.w / charCount : at.size * 0.5;
+      }
+
       const lines: Line[] = [];
       for (const atom of atoms) {
         const tol = Math.max(2, atom.size * 0.5);
         const last = lines[lines.length - 1];
         if (last && Math.abs(last.baseline - atom.baseline) <= tol) {
-          last.atoms.push(atom);
+          const lastAtom = last.atoms[last.atoms.length - 1];
+          const gap = atom.bbox.x - (lastAtom.bbox.x + lastAtom.bbox.w);
+          // 阈值 = 两个 atom 中较大的平均字符宽度 * 3
+          const avgW = Math.max(avgCharWidth(lastAtom), avgCharWidth(atom));
+          if (gap > avgW * 3) {
+            // 间距超过 3 个字符宽度 -- 拆分为独立块。
+            lines.push({
+              baseline: atom.baseline,
+              atoms: [atom],
+              text: '',
+              x: atom.bbox.x,
+              w: atom.bbox.w,
+              y: atom.bbox.y,
+              h: atom.bbox.h,
+              size: atom.size,
+              font: atom.font,
+              bold: atom.bold,
+              italic: atom.italic,
+            });
+          } else {
+            last.atoms.push(atom);
+          }
         } else {
           lines.push({
             baseline: atom.baseline,
@@ -182,7 +210,9 @@ function detectTextBlocksImpl(
         line.isHeading = line.size > medianSize * 1.5;
       }
 
-      // 按段落聚类:相邻行(x 范围重叠 + 行间距合理 + 字号相近 + 对齐一致)合并
+      // 按段落聚类:多行字号/粗细/斜体一致 -> 同一段落。
+      // 任何一个样式属性不同 -> 拆分为独立块。
+      // 行间距阈值基于实际字符宽度(自适应)。
       interface Paragraph { lines: Line[] }
       const paragraphs: Paragraph[] = [];
       for (const line of lines) {
@@ -194,12 +224,17 @@ function detectTextBlocksImpl(
           const minSize = Math.min(prev.size, line.size);
           const maxSize = Math.max(prev.size, line.size);
           const xOverlap = line.x < prev.x + prev.w && line.x + line.w > prev.x;
-          const spacingOk = baselineDiff >= minSize * 0.8 && baselineDiff <= maxSize * 3.0;
-          const sizeOk = maxSize / minSize <= 1.3;
-          // Split when alignment differs or heading boundary crossed.
+          // 行间距:0.8x ~ 2.0x 字号(正常行距 1.2-1.5x)。
+          const spacingOk = baselineDiff >= minSize * 0.8 && baselineDiff <= maxSize * 2.0;
+          // 字号一致(1.1x 以内视为相同)。
+          const sizeOk = maxSize / minSize <= 1.1;
+          // 粗细和斜体必须一致才合并。
+          const styleOk = line.bold === prev.bold && line.italic === prev.italic;
+          // 对齐方式必须一致。
           const alignOk = (line.align || 'left') === (prev.align || 'left');
+          // 标题边界不跨越。
           const headingOk = !!line.isHeading === !!prev.isHeading;
-          if (xOverlap && spacingOk && sizeOk && alignOk && headingOk) {
+          if (xOverlap && spacingOk && sizeOk && styleOk && alignOk && headingOk) {
             last.lines.push(line);
             continue;
           }

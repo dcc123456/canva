@@ -90,9 +90,9 @@ export function segmentsToTipTapContent(
     const isItalic = hasSegments ? !!seg.italic : (seg.italic ?? blockDefaults?.italic);
     const isUnderline = hasSegments ? !!seg.underline : (seg.underline ?? false);
     const isStrike = hasSegments ? !!seg.strike : (seg.strike ?? false);
-    const color = hasSegments ? seg.color : (seg.color ?? blockDefaults?.color);
-    const fontSize = hasSegments ? seg.fontSize : (seg.fontSize ?? blockDefaults?.fontSize);
-    const fontFamily = hasSegments ? seg.fontFamily : (seg.fontFamily ?? blockDefaults?.fontFamily);
+    const color = seg.color ?? blockDefaults?.color;
+    const fontSize = seg.fontSize ?? blockDefaults?.fontSize;
+    const fontFamily = seg.fontFamily ?? blockDefaults?.fontFamily;
 
     if (isBold) marks.push({ type: 'bold' });
     if (isItalic) marks.push({ type: 'italic' });
