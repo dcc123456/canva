@@ -14,7 +14,8 @@ import { FontFamily } from '@tiptap/extension-font-family';
 import { Text } from '@tiptap/extension-text';
 import { Extension } from '@tiptap/core';
 import type { Editor, JSONContent } from '@tiptap/core';
-import type { RichTextSegment, TextBlockItem } from '../../core/types';
+import type { FontClass, RichTextSegment, TextBlockItem } from '../../core/types';
+import { FONT_CLASS_TO_CSS } from '../../core/engine/fontClassify';
 
 // ---------- Custom Text extension: preserve all whitespace -------------------
 // ProseMirror's default text node trims/collapses whitespace per HTML rules.
@@ -62,6 +63,7 @@ function styleKey(seg: RichTextSegment): string {
     seg.color || '',
     seg.fontSize ?? 0,
     seg.fontFamily || '',
+    seg.fontClass ?? '',
   ].join('|');
 }
 
@@ -73,6 +75,7 @@ export interface BlockDefaults {
   color?: string;
   fontSize?: number;
   fontFamily?: string;
+  fontClass?: FontClass;
 }
 
 export function segmentsToTipTapContent(
@@ -92,7 +95,14 @@ export function segmentsToTipTapContent(
     const isStrike = hasSegments ? !!seg.strike : (seg.strike ?? false);
     const color = seg.color ?? blockDefaults?.color;
     const fontSize = seg.fontSize ?? blockDefaults?.fontSize;
-    const fontFamily = seg.fontFamily ?? blockDefaults?.fontFamily;
+    const fontClass = seg.fontClass ?? blockDefaults?.fontClass;
+    // Resolve fontClass -> CSS font-family. Fall back to seg.fontFamily
+    // (legacy PDF font name, browser will substitute) only if fontClass
+    // is absent -- this should not happen post-ADR-0001, but kept for
+    // backward compatibility with old .minipdf.json projects.
+    const cssFontFamily = fontClass
+      ? FONT_CLASS_TO_CSS[fontClass]
+      : (seg.fontFamily ?? blockDefaults?.fontFamily);
 
     if (isBold) marks.push({ type: 'bold' });
     if (isItalic) marks.push({ type: 'italic' });
@@ -102,7 +112,7 @@ export function segmentsToTipTapContent(
     const tsAttrs: Record<string, unknown> = {};
     if (color) tsAttrs.color = color;
     if (fontSize) tsAttrs.fontSize = fontSize;
-    if (fontFamily) tsAttrs.fontFamily = fontFamily;
+    if (cssFontFamily) tsAttrs.fontFamily = cssFontFamily;
     if (Object.keys(tsAttrs).length > 0) {
       marks.push({ type: 'textStyle', attrs: tsAttrs });
     }
@@ -128,6 +138,7 @@ export function segmentsToTipTapContent(
         color: blockDefaults?.color,
         fontSize: blockDefaults?.fontSize,
         fontFamily: blockDefaults?.fontFamily,
+        fontClass: blockDefaults?.fontClass,
       }];
 
   for (const seg of segs) {
@@ -157,6 +168,7 @@ export function editorToSegments(
       color?: string;
       fontSize?: number;
       fontFamily?: string;
+      fontClass?: FontClass;
     }
   ): void {
     if (node.type === 'text') {
@@ -172,9 +184,11 @@ export function editorToSegments(
       const color = (attrs?.color as string) || inherited.color;
       const fontSize = (attrs?.fontSize as number | undefined) || inherited.fontSize;
       const fontFamily = (attrs?.fontFamily as string | undefined) || inherited.fontFamily;
+      const fontClass = (attrs?.fontClass as FontClass | undefined) || inherited.fontClass;
       if (color) seg.color = color;
       if (fontSize) seg.fontSize = fontSize;
       if (fontFamily) seg.fontFamily = fontFamily;
+      if (fontClass) seg.fontClass = fontClass;
       raw.push(seg);
     } else if (node.type === 'hardBreak') {
       const seg: RichTextSegment = { text: '\n' };
@@ -185,6 +199,7 @@ export function editorToSegments(
       if (inherited.color) seg.color = inherited.color;
       if (inherited.fontSize) seg.fontSize = inherited.fontSize;
       if (inherited.fontFamily) seg.fontFamily = inherited.fontFamily;
+      if (inherited.fontClass) seg.fontClass = inherited.fontClass;
       raw.push(seg);
     }
   }
@@ -283,6 +298,7 @@ export function RichTextEditor({
       color: block.color,
       fontSize: block.fontSize,
       fontFamily: block.font,
+      fontClass: block.fontClass,
     }),
     autofocus: true,
     onUpdate: ({ editor: ed }) => {
@@ -294,7 +310,7 @@ export function RichTextEditor({
           'outline: none',
           `font-size: ${Math.max(8, block.fontSize * zoom)}px`,
           `line-height: ${block.lineHeight || 1.2}`,
-          `font-family: ${block.font}`,
+          `font-family: ${block.fontClass ? FONT_CLASS_TO_CSS[block.fontClass] : block.font}`,
           `color: ${block.color || '#000000'}`,
           'padding: 0',
           'white-space: pre-wrap',

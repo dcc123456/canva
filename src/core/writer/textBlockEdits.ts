@@ -11,14 +11,81 @@
 //   3. 用 pdf-lib 在原 baseline 画新字(CJK 用 fontkit + Source Han Sans)
 //
 // 新路径(redaction):步骤 1-2 由 redact.ts 在导出前完成,本函数只做步骤 3。
-import { PDFDocument, PDFPage, rgb } from 'pdf-lib';
+//
+// ADR 0001 后:字体策略改为 FontClass -> 具体字体映射,不再抽取原嵌入字体。
+//   - 'sans'/'serif'/'mono' -> pdf-lib StandardFonts (Helvetica/Times/Courier)
+//   - 'cjk-sans'/'cjk-serif' -> @pdf-lib/fontkit 嵌入 SourceHanSansCN-Regular.otf
+//     (cjk-serif 暂时复用 SourceHanSans,等下载 Source Han Serif 后独立)
+import { PDFDocument, PDFPage, PDFOperator, StandardFonts, rgb } from 'pdf-lib';
 import type { PDFFont } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
-import type { PageMeta, TextBlockItem } from '../types';
-import { hexToRgb, pickStandardFont, wrapText, alignedX } from './helpers';
-import { loadCjkFontBytes, containsNonAscii } from './cjkFont';
+import type { FontClass, PageMeta, TextBlockItem } from '../types';
+import { hexToRgb, wrapText, alignedX } from './helpers';
+import { loadCjkFontBytesForVariant, containsNonAscii, type FontWeight } from './cjkFont';
 import { collectWhiteoutQuads, type Quad } from './textQuad';
-import { extractEmbeddedFont } from './fontExtract';
+import {
+  FONT_CLASS_TO_PDF_STRATEGY,
+  pickStandardFontVariant,
+} from '../engine/fontClassify';
+
+/**
+ * 绘制单个 segment 到 page。
+ * - 西文:用 StandardFonts 的 Bold/Italic 真变体(getFont 已选好),直接画。
+ * - CJK Bold:getFont 加载真 Bold 字重文件(SourceHanSansCN-Bold.otf),直接画。
+ * - CJK Italic:Source Han Sans 没有 italic 变体(CJK 字体惯例),
+ *   用 pushOperators 设置 CTM 为斜切矩阵模拟。
+ *
+ * italic 模拟原理:CTM 矩阵 `1 0 italicSkew 1 -italicSkew*y 0 cm`
+ * 让基线 y 处位置不变(通过 -italicSkew*y 平移补偿),
+ * glyph 顶部向右偏 italicSkew*size,产生斜体效果。
+ */
+function drawSegmentText(
+  page: PDFPage,
+  text: string,
+  x: number,
+  y: number,
+  size: number,
+  font: PDFFont,
+  fillColor: ReturnType<typeof rgb>,
+  opts: { italic: boolean; isCjk: boolean }
+): void {
+  const { italic, isCjk } = opts;
+
+  // 西文:字体已包含 italic 变体,直接画。
+  // CJK 非 italic:直接画(Bold 已在 getFont 阶段选好字重文件)。
+  if (!italic || !isCjk) {
+    page.drawText(text, { x, y, size, font, color: fillColor });
+    return;
+  }
+
+  // CJK italic 模拟:CTM 斜切。
+  const italicSkew = 0.21; // ~12° = tan(12°)
+  const translateX = -italicSkew * y;
+  // q/Q/cm 是合法 PDF 操作符,但 pdf-lib 的 TS 类型白名单不含它们。
+  // 用 as never 绕过类型检查;运行时 PDFOperator.of 接受任意字符串。
+  page.pushOperators(PDFOperator.of('q' as never));
+  page.pushOperators(
+    PDFOperator.of(`1 0 ${italicSkew} 1 ${translateX} 0 cm` as never)
+  );
+  page.drawText(text, { x, y, size, font, color: fillColor });
+  page.pushOperators(PDFOperator.of('Q' as never));
+}
+// pickStandardFontVariant returns one of these strings; we map to the enum
+// value to call doc.embedFont.
+const STANDARD_FONT_BY_NAME: Record<string, StandardFonts> = {
+  Helvetica: StandardFonts.Helvetica,
+  'Helvetica-Bold': StandardFonts.HelveticaBold,
+  'Helvetica-Oblique': StandardFonts.HelveticaOblique,
+  'Helvetica-BoldOblique': StandardFonts.HelveticaBoldOblique,
+  'Times-Roman': StandardFonts.TimesRoman,
+  'Times-Bold': StandardFonts.TimesRomanBold,
+  'Times-Italic': StandardFonts.TimesRomanItalic,
+  'Times-BoldItalic': StandardFonts.TimesRomanBoldItalic,
+  Courier: StandardFonts.Courier,
+  'Courier-Bold': StandardFonts.CourierBold,
+  'Courier-Oblique': StandardFonts.CourierOblique,
+  'Courier-BoldOblique': StandardFonts.CourierBoldOblique,
+};
 
 export interface ApplyTextBlockRedrawsOptions {
   /** 已通过 applyPages 处理好页面顺序/旋转的 PDFDocument。 */
@@ -44,74 +111,79 @@ export async function applyTextBlockRedraws(
   if (textBlocks.length === 0) return;
 
   // 字体缓存:同一字体只 embed 一次。
+  // key 形如 "standard:Helvetica-Bold" 或 "cjk:cjk-sans:bold"
   const fontCache = new Map<string, PDFFont>();
-  // 抽取字体缓存:key = "pageIndex:fontName", value = PDFFont | null
-  const extractedFontCache = new Map<string, PDFFont | null>();
-  let cjkFont: PDFFont | null = null;
-  let cjkFontAttempted = false;
+  const cjkFontAttempted = new Set<string>();
 
   async function getFont(
     text: string,
     bold: boolean,
     italic: boolean,
-    fontName = 'Helvetica',
-    editorPageIndex = -1
+    fontClass: FontClass = 'sans'
   ): Promise<{ font: PDFFont; safe: string }> {
-    // 1. 优先从原 PDF 抽取嵌入字体(匹配原文字体,不退化为 StandardFonts)。
-    if (editorPageIndex >= 0) {
-      const cacheKey = `${editorPageIndex}:${fontName}`;
-      if (!extractedFontCache.has(cacheKey)) {
-        const bytes = extractEmbeddedFont(doc, editorPageIndex, fontName);
-        if (bytes) {
-          try {
-            const font = await doc.embedFont(bytes, { subset: true });
-            extractedFontCache.set(cacheKey, font);
-          } catch {
-            extractedFontCache.set(cacheKey, null);
-          }
-        } else {
-          extractedFontCache.set(cacheKey, null);
-        }
-      }
-      const extracted = extractedFontCache.get(cacheKey);
-      if (extracted) {
-        return { font: extracted, safe: text };
-      }
+    // 防御:如果调用方传入 'sans' 但文本含 CJK,说明 fontClass 未被检测端
+    // 设置(可能是老 .minipdf.json 项目),fallback 到 cjk-sans。
+    // 否则会走 StandardFonts 路径把中文转成 '?'。
+    if (fontClass === 'sans' && containsNonAscii(text)) {
+      fontClass = 'cjk-sans';
     }
+    const strategy = FONT_CLASS_TO_PDF_STRATEGY[fontClass];
 
-    // 2. 降级路径:CJK CDN 字体 / StandardFonts
-    const needsCjk = containsNonAscii(text);
-    if (needsCjk) {
-      if (!cjkFontAttempted) {
-        cjkFontAttempted = true;
-        doc.registerFontkit(fontkit);
-        const bytes = await loadCjkFontBytes();
-        if (bytes) {
-          cjkFont = await doc.embedFont(bytes, { subset: false });
-        }
-      }
-      if (cjkFont) {
-        return { font: cjkFont, safe: text };
-      }
-      const fallbackName = pickStandardFont(fontName, bold, italic);
-      let f = fontCache.get(fallbackName);
+    if (strategy.kind === 'standard') {
+      const variantName = pickStandardFontVariant(strategy.name, bold, italic);
+      const cacheKey = `standard:${variantName}`;
+      // pdf-lib StandardFonts 的变体名(如 Helvetica-Bold)需要单独 embed
+      const standardEnum = STANDARD_FONT_BY_NAME[variantName];
+      let f = fontCache.get(cacheKey);
       if (!f) {
-        f = await doc.embedFont(fallbackName);
-        fontCache.set(fallbackName, f);
+        f = await doc.embedFont(standardEnum);
+        fontCache.set(cacheKey, f);
       }
+      // StandardFonts 仅 WinAnsi,非 ASCII 字符降级为 ?
       let safe = '';
       for (const ch of text) {
         safe += (ch.codePointAt(0) ?? 0) > 0x7e ? '?' : ch;
       }
       return { font: f, safe };
     }
-    const name = pickStandardFont(fontName, bold, italic);
-    let f = fontCache.get(name);
-    if (!f) {
-      f = await doc.embedFont(name);
-      fontCache.set(name, f);
+
+    // strategy.kind === 'cjk-file' -- 加载对应 fontClass + weight 变体。
+    // Bold 用真 Bold 字重文件(SourceHanSansCN-Bold.otf 等),不靠偏移模拟。
+    // Italic 用 CTM 斜切模拟(Source Han Sans 没有 italic 变体,这是 CJK 字体惯例)。
+    const weight: FontWeight = bold ? 'bold' : 'regular';
+    const cacheKey = `cjk:${fontClass}:${weight}`;
+    if (!cjkFontAttempted.has(cacheKey)) {
+      cjkFontAttempted.add(cacheKey);
+      doc.registerFontkit(fontkit);
+      const bytes = await loadCjkFontBytesForVariant(fontClass, weight);
+      if (bytes) {
+        try {
+          // 用 subset: false 嵌入整字体。subset: true 对 CID/CFF 字体
+          // (Source Han Sans)可能产生不完整子集,导致中文字形缺失。
+          // 整字体嵌入虽然 PDF 略大(~8MB),但保证所有字形可用。
+          const font = await doc.embedFont(bytes, { subset: false });
+          fontCache.set(cacheKey, font);
+        } catch (err) {
+          console.warn('[textBlockEdits] embedFont %s 失败:', cacheKey, err);
+        }
+      }
     }
-    return { font: f, safe: text };
+    const cjkFont = fontCache.get(cacheKey);
+    if (cjkFont) {
+      return { font: cjkFont, safe: text };
+    }
+    // CJK 字体加载失败 -> 退回 Helvetica,非 ASCII 变 ?
+    const fbKey = 'standard:Helvetica';
+    let f = fontCache.get(fbKey);
+    if (!f) {
+      f = await doc.embedFont(StandardFonts.Helvetica);
+      fontCache.set(fbKey, f);
+    }
+    let safe = '';
+    for (const ch of text) {
+      safe += (ch.codePointAt(0) ?? 0) > 0x7e ? '?' : ch;
+    }
+    return { font: f, safe };
   }
 
   for (const block of textBlocks) {
@@ -172,6 +244,10 @@ export async function applyTextBlockRedraws(
         size: number;
         underline: boolean;
         strike: boolean;
+        bold: boolean;
+        italic: boolean;
+        /** true 表示该 SegInfo 用的是 CJK 字体(没有 Bold 变体,需要靠偏移模拟粗体) */
+        isCjk: boolean;
       };
       const lines: SegInfo[][] = [[]];
 
@@ -180,7 +256,7 @@ export async function applyTextBlockRedraws(
         const segItalic = !!seg.italic;
         const segColor = seg.color || block.color;
         const segSize = seg.fontSize || block.fontSize;
-        const segFontName = seg.fontFamily || block.font;
+        const segFontClass: FontClass = seg.fontClass || block.fontClass || 'sans';
         const parts = seg.text.split('\n');
         for (let pi = 0; pi < parts.length; pi++) {
           if (pi > 0) lines.push([]);
@@ -191,10 +267,11 @@ export async function applyTextBlockRedraws(
                 partText,
                 segBold,
                 segItalic,
-                segFontName,
-                editorPageIndex
+                segFontClass
               );
               const width = font.widthOfTextAtSize(safe, segSize);
+              const strategy = FONT_CLASS_TO_PDF_STRATEGY[segFontClass];
+              const isCjk = strategy.kind === 'cjk-file';
               lines[lines.length - 1].push({
                 text: safe,
                 font,
@@ -203,6 +280,9 @@ export async function applyTextBlockRedraws(
                 size: segSize,
                 underline: !!seg.underline,
                 strike: !!seg.strike,
+                bold: segBold,
+                italic: segItalic,
+                isCjk,
               });
             } catch (err) {
               console.warn(
@@ -224,12 +304,12 @@ export async function applyTextBlockRedraws(
             pageHeight - block.bbox.y - fontSize - li * lineStep;
           for (const s of segs) {
             const { r: sr, g: sg, b: sb } = hexToRgb(s.color);
-            page.drawText(s.text, {
-              x,
-              y,
-              size: s.size,
-              font: s.font,
-              color: rgb(sr, sg, sb),
+            const fillColor = rgb(sr, sg, sb);
+            // 用统一入口绘制:CJK 模拟 italic,西文用真变体。
+            // Bold 不再需要模拟 -- getFont 已加载真 Bold 字重文件。
+            drawSegmentText(page, s.text, x, y, s.size, s.font, fillColor, {
+              italic: s.italic,
+              isCjk: s.isCjk,
             });
             // Draw underline / strikethrough as thin lines.
             if (s.underline || s.strike) {
@@ -276,13 +356,15 @@ export async function applyTextBlockRedraws(
       }
     } else {
       // No segments: wrap + align + multi-line.
+      const blockFontClass: FontClass = block.fontClass || 'sans';
       const { font, safe } = await getFont(
         block.text.replace(/\t/g, '    '),
         block.bold,
         block.italic,
-        block.font,
-        editorPageIndex
+        blockFontClass
       );
+      const blockStrategy = FONT_CLASS_TO_PDF_STRATEGY[blockFontClass];
+      const blockIsCjk = blockStrategy.kind === 'cjk-file';
 
       const drawAllLines = (f: PDFFont, text: string) => {
         const wrappedLines = wrapText(f, text, block.bbox.w, fontSize);
@@ -291,12 +373,9 @@ export async function applyTextBlockRedraws(
           const x = alignedX(align, block.bbox.x, block.bbox.w, lineW);
           const y =
             pageHeight - block.bbox.y - fontSize - li * lineStep;
-          page.drawText(wrappedLines[li], {
-            x,
-            y,
-            size: fontSize,
-            font: f,
-            color: rgb(r, g, b),
+          drawSegmentText(page, wrappedLines[li], x, y, fontSize, f, rgb(r, g, b), {
+            italic: block.italic,
+            isCjk: blockIsCjk,
           });
         }
       };
@@ -338,11 +417,11 @@ async function fallbackDrawText(
   color: ReturnType<typeof rgb>
 ): Promise<void> {
   try {
-    const fallbackName = pickStandardFont('Helvetica', false, false);
-    let fb = fontCache.get(fallbackName);
+    const cacheKey = 'standard:Helvetica';
+    let fb = fontCache.get(cacheKey);
     if (!fb) {
-      fb = await doc.embedFont(fallbackName);
-      fontCache.set(fallbackName, fb);
+      fb = await doc.embedFont(StandardFonts.Helvetica);
+      fontCache.set(cacheKey, fb);
     }
     let safeAscii = '';
     for (const ch of block.text.replace(/\t/g, '    ')) {

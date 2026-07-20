@@ -2,9 +2,10 @@
 //
 // 架构:
 //   1. 加载干净的原 pdfBytes
-//   2. applyMupdfRedactions (MuPDF 字节级删字,替代白底覆盖)
+//   2. applyMupdfRedactions (MuPDF 字节级删字,仅对 edited text-block)
 //   3. PDFDocument.load(redactedBytes) + applyPages (copyPages + 旋转)
-//   4. applyTextBlockRedraws (画新字;redacted=true 跳过白底,false 走白底兜底)
+//   4. applyTextBlockRedraws (画新字;仅对 edited text-block,
+//      redacted=true 跳过白底,false 走白底兜底)
 //   5. flattenOverlays (非 text-block 的 overlay: highlight/note/
 //      text/image/drawing)
 //   6. createFormFields (pdf-lib form API 重建 AcroForm)
@@ -13,7 +14,12 @@
 // 关键改进:
 //   * MuPDF applyRedactions(false,0,0,0) 字节级删字,不再有白底色块
 //   * redaction 失败时自动降级为白底覆盖(redacted=false 兜底)
-//   * 原 PDF 矢量保留,未编辑文字仍可搜索/复制
+//   * 原 PDF 矢量保留,未编辑文字保留原嵌入字体(bold/color/size 全部保留)
+//
+// 注意:ADR 0003 原计划"重画所有 detected text-block",但因目前缺少
+// Source Han Sans Bold 字重 + 颜色抽取精度不足,重画会丢失原 PDF 的
+// bold/color/size 信息。暂时回退为"仅重画编辑过的块"。等 Bold CJK
+// 字体落地 + 颜色抽取鲁棒后再启用全量重画。
 import { PDFDocument } from 'pdf-lib';
 import { useDocumentStore } from '../../store/documentStore';
 import { applyPages } from '../../core/writer/pages';
@@ -21,9 +27,10 @@ import { flattenOverlays } from '../../core/writer/flatten';
 import { applyTextBlockRedraws } from '../../core/writer/textBlockEdits';
 import { applyMupdfRedactions, type RedactEdit } from '../../core/writer/redact';
 import { createFormFields } from '../../core/writer/formFields';
-import { loadCjkFontBytes } from '../../core/writer/cjkFont';
+import { loadCjkFontBytesForVariant, containsNonAscii, type FontWeight } from '../../core/writer/cjkFont';
 import { downloadBlob } from '../../utils/download';
 import type {
+  FontClass,
   FormFieldItem,
   TextBlockItem,
 } from '../../core/types';
@@ -46,7 +53,8 @@ export async function exportPdf(
 
   onProgress?.({ phase: 'load' });
 
-  // 提前计算编辑块列表(redaction 和重画都需要)。
+  // 仅重画被编辑过的 text-block(原 PDF 矢量保留 + 未编辑文字保留原嵌入字体)。
+  // ADR 0003 的"全文本重画"暂时回退,见文件头注释。
   const editedTextBlocks = overlays.filter(
     (o): o is TextBlockItem =>
       o.type === 'text-block' &&
@@ -68,7 +76,7 @@ export async function exportPdf(
   if (pdfBytes) {
     const cleanBytes = pdfBytes.slice();
 
-    // Phase: redact -- MuPDF 字节级删字(替代白底覆盖)。
+    // Phase: redact -- 仅对被编辑的 text-block 字节级删字。
     if (editedTextBlocks.length > 0) {
       onProgress?.({ phase: 'redact' });
       const redactEdits: RedactEdit[] = [];
@@ -106,13 +114,32 @@ export async function exportPdf(
   // redacted=false: 走白底覆盖 + 重画(兜底)。
   onProgress?.({ phase: 'textedits' });
   if (editedTextBlocks.length > 0) {
-    // 预加载 CJK 字体:如果有编辑过的 text-block 含中文,需要 CJK 字体。
-    const hasCjk = editedTextBlocks.some((b) =>
-      b.text.split('').some((ch) => (ch.codePointAt(0) ?? 0) > 0x7e)
-    );
-    if (hasCjk) {
-      await loadCjkFontBytes();
+    // 预加载 CJK 字体:收集所有需要的 (fontClass, weight) 组合。
+    // Bold 块需要 Bold 字重文件,非 Bold 块用 Regular。
+    const neededVariants = new Set<string>();
+    const addVariant = (fontClass: FontClass | undefined, bold: boolean, text: string) => {
+      let fc = fontClass;
+      if (!fc) {
+        // 老项目无 fontClass,按内容判定
+        fc = containsNonAscii(text) ? 'cjk-sans' : 'sans';
+      }
+      if (fc !== 'cjk-sans' && fc !== 'cjk-serif') return;
+      const weight: FontWeight = bold ? 'bold' : 'regular';
+      neededVariants.add(`${fc}:${weight}`);
+    };
+    for (const b of editedTextBlocks) {
+      addVariant(b.fontClass, !!b.bold, b.text);
+      if (b.segments) {
+        for (const seg of b.segments) {
+          addVariant(seg.fontClass ?? b.fontClass, !!seg.bold, seg.text);
+        }
+      }
     }
+    const promises = [...neededVariants].map((key) => {
+      const [fc, w] = key.split(':') as [FontClass, FontWeight];
+      return loadCjkFontBytesForVariant(fc, w);
+    });
+    await Promise.all(promises);
     await applyTextBlockRedraws({
       doc,
       originalBytes: workingBytes,

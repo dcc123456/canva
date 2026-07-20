@@ -17,7 +17,8 @@ import type {
   ParseFormFieldsOptions,
   TextBlock,
 } from './types';
-import type { Rect } from '../types';
+import type { FontClass, Rect } from '../types';
+import { classifyFontWithFallback } from './fontClassify';
 
 interface PdfJsTextItem {
   str: string;
@@ -145,6 +146,7 @@ async function detectTextBlocksImpl(
     fontSize: number;
     fontName: string;
     text: string;
+    fontClass: FontClass;
   }
   const lineInfos: LineInfo[] = [];
   for (const line of lines) {
@@ -159,6 +161,7 @@ async function detectTextBlocksImpl(
       fontSize,
       fontName,
       text,
+      fontClass: classifyFontWithFallback(fontName, text),
     });
   }
   // 按段落聚类:相邻行(x 范围重叠 + 行间距合理 + 字号相近)合并
@@ -215,6 +218,7 @@ async function detectTextBlocksImpl(
       lineHeight: Math.max(0.5, Math.round(lineHeight * 100) / 100),
       bold: /bold/i.test(head.fontName),
       italic: /italic|oblique/i.test(head.fontName),
+      fontClass: head.fontClass,
     } satisfies TextBlock;
   });
   page.cleanup();

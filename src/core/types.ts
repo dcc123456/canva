@@ -11,6 +11,9 @@ export type Tool =
   | 'signature'
   | 'form';
 
+/** Canonical font category used for rendering (see ADR 0001). */
+export type FontClass = 'sans' | 'serif' | 'mono' | 'cjk-sans' | 'cjk-serif';
+
 /** Rich-text segment for inline styling within a text element. */
 export interface RichTextSegment {
   text: string;
@@ -21,6 +24,8 @@ export interface RichTextSegment {
   color?: string;
   fontSize?: number;
   fontFamily?: string;
+  /** Resolved font class. When absent, the parent block's fontClass is used. */
+  fontClass?: FontClass;
 }
 
 export type TextAlign = 'left' | 'center' | 'right';
@@ -81,6 +86,8 @@ export interface TextItem extends OverlayBase {
   lineHeight?: number;
   /** Optional rich-text segments. When absent, the whole text uses bold/italic/color. */
   segments?: RichTextSegment[];
+  /** Canonical font class (see ADR 0001). Defaults to 'sans'. */
+  fontClass?: FontClass;
 }
 
 // F4
@@ -104,7 +111,7 @@ export interface DrawingItem extends OverlayBase {
 // F10
 // 重构后文本编辑只更新 overlay，不再回写 pdfBytes。
 // "是否被编辑过" = text !== originalText || bbox 移动了；
-// 导出时据此决定是否需要在原 PDF 上对原字做字符级白底覆盖并重画新字。
+// 但 ADR 0003 后,所有 detected block 都在导出时重画(无论是否编辑)。
 // originalBbox 是检测时的原始位置(永不改)，bbox 是当前位置(可被拖动)。
 // 白底画在 originalBbox(盖原字)，新字画在 bbox(新位置)。
 export interface TextBlockItem extends OverlayBase {
@@ -125,6 +132,8 @@ export interface TextBlockItem extends OverlayBase {
   segments?: RichTextSegment[];
   /** Segments snapshot at detection time. Used to detect user edits to styling. */
   originalSegments?: RichTextSegment[];
+  /** Canonical font class (see ADR 0001). Defaults to 'sans'. */
+  fontClass?: FontClass;
 }
 
 // F11

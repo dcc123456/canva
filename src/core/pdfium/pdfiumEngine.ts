@@ -33,6 +33,7 @@ import type {
 import { pdfLibFallbackEngine as pdfLibFallback } from '../engine/pdfLibFallback';
 import { asPdfium, free, malloc, mallocFromBytes, mallocFromString, readUtf16LE, type PdfiumLike } from './helpers';
 import { loadPdfium } from './loader';
+import { classifyFontWithFallback } from '../engine/fontClassify';
 
 // ---------- low-level helpers -----------------------------------------------
 
@@ -140,6 +141,7 @@ async function detectTextBlocksImpl(
         lineHeight: 1.2,
         bold: false,
         italic: false,
+        fontClass: classifyFontWithFallback('embedded', char),
       });
     }
     return blocks;

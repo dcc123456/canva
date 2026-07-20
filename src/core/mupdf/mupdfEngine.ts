@@ -16,9 +16,12 @@ import type {
   ParseFormFieldsOptions,
   TextBlock,
 } from '../engine/types';
-import type { RichTextSegment } from '../types';
+import type { FontClass, RichTextSegment } from '../types';
 import { pdfLibFallbackEngine as pdfLibFallback } from '../engine/pdfLibFallback';
 import { loadMupdf, type MupdfNs } from './loader';
+import { classifyFontWithFallback } from '../engine/fontClassify';
+import { extractTextColors, matchColorsToAtoms } from '../pdf/textColor';
+import { loadDocument } from '../pdf/loader';
 
 // MuPDF 的 StructuredText JSON schema(`mupdf.d.ts` 里 `asJSON()` 返回
 // string)。
@@ -45,11 +48,11 @@ interface MupdfStextJson {
 
 // ---------- detectTextBlocks ------------------------------------------------
 
-function detectTextBlocksImpl(
+async function detectTextBlocksImpl(
   mupdf: MupdfNs,
   bytes: Uint8Array,
   pageIndex: number
-): TextBlock[] {
+): Promise<TextBlock[]> {
   const buf = new Uint8Array(bytes);
   const doc = mupdf.Document.openDocument(buf, 'application/pdf');
   try {
@@ -61,6 +64,7 @@ function detectTextBlocksImpl(
       stext = page.toStructuredText('preserve-spans');
       const json = JSON.parse(stext.asJSON()) as MupdfStextJson;
       interface AtomLine {
+        id: string;
         bbox: { x: number; y: number; w: number; h: number };
         text: string;
         baseline: number;
@@ -68,8 +72,11 @@ function detectTextBlocksImpl(
         size: number;
         bold: boolean;
         italic: boolean;
+        fontClass: FontClass;
+        color?: string;
       }
       const atoms: AtomLine[] = [];
+      let atomCounter = 0;
       for (const block of json.blocks) {
         if (block.type !== 'text' || !block.lines) continue;
         for (const line of block.lines) {
@@ -83,7 +90,9 @@ function detectTextBlocksImpl(
           const fLower = fName.toLowerCase();
           const wLower = (fi?.weight ?? '').toLowerCase();
           const sLower = (fi?.style ?? '').toLowerCase();
+          const fc = classifyFontWithFallback(fName, text);
           atoms.push({
+            id: `atom-${pageIndex}-${atomCounter++}`,
             bbox: { ...line.bbox },
             text,
             baseline,
@@ -91,8 +100,35 @@ function detectTextBlocksImpl(
             size: fi?.size || line.bbox.h || 12,
             bold: fLower.includes('bold') || wLower.includes('bold') || wLower === '700',
             italic: fLower.includes('italic') || fLower.includes('oblique') || sLower.includes('italic') || sLower.includes('oblique'),
+            fontClass: fc,
           });
         }
+      }
+
+      // ADR 0002: 提取每段 showText 的真实颜色,按位置匹配到每个 atom。
+      // 在 atoms 聚合成 lines/blocks 之前先做,确保 atom.id 还在。
+      try {
+        const pdfjsDoc = await loadDocument(new Uint8Array(bytes));
+        const pdfjsPage = await pdfjsDoc.getPage(pageIndex + 1);
+        const viewport = pdfjsPage.getViewport({ scale: 1 });
+        const coloredTexts = await extractTextColors(pdfjsPage);
+        if (coloredTexts.length > 0) {
+          const colorMap = matchColorsToAtoms(
+            coloredTexts,
+            atoms.map((a) => ({ id: a.id, bbox: a.bbox })),
+            viewport.height
+          );
+          for (const atom of atoms) {
+            const c = colorMap.get(atom.id);
+            if (c) atom.color = c;
+          }
+        }
+        pdfjsPage.cleanup();
+        await pdfjsDoc.cleanup();
+      } catch (err) {
+        // 颜色抽取失败不阻断检测,atom.color 留空,后续 segment.color 也会空,
+        // 渲染端会 fallback 到 block.color 或 '#000000'。
+        console.warn('[mupdfEngine] 颜色抽取失败,使用默认黑色:', err);
       }
       // 按 baseline 聚类:同行 span (baseline 差 < 字号/2) 拼到一起。
       // 同行两个 atom 之间水平间距 > 平均字符宽度的 3 倍时拆分,
@@ -112,6 +148,7 @@ function detectTextBlocksImpl(
         italic: boolean;
         align?: 'left' | 'center' | 'right';
         isHeading?: boolean;
+        fontClass: FontClass;
       }
       // 计算平均字符宽度:用所有 atom 的 text 长度 / bbox 宽度。
       function avgCharWidth(at: AtomLine): number {
@@ -142,6 +179,7 @@ function detectTextBlocksImpl(
               font: atom.font,
               bold: atom.bold,
               italic: atom.italic,
+              fontClass: atom.fontClass,
             });
           } else {
             last.atoms.push(atom);
@@ -159,6 +197,7 @@ function detectTextBlocksImpl(
             font: atom.font,
             bold: atom.bold,
             italic: atom.italic,
+            fontClass: atom.fontClass,
           });
         }
       }
@@ -177,6 +216,7 @@ function detectTextBlocksImpl(
         line.font = line.atoms[0].font;
         line.bold = line.atoms[0].bold;
         line.italic = line.atoms[0].italic;
+        line.fontClass = line.atoms[0].fontClass;
       }
       // Compute page content area and median font size for alignment/heading detection.
       const allLefts = lines.map((l) => l.x);
@@ -276,6 +316,8 @@ function detectTextBlocksImpl(
             if (atom.italic) seg.italic = true;
             if (atom.font) seg.fontFamily = atom.font;
             if (atom.size) seg.fontSize = Math.round(atom.size * 100) / 100;
+            if (atom.fontClass) seg.fontClass = atom.fontClass;
+            if (atom.color) seg.color = atom.color;
             rawSegs.push(seg);
           }
         });
@@ -288,7 +330,9 @@ function detectTextBlocksImpl(
             !!last.bold === !!seg.bold &&
             !!last.italic === !!seg.italic &&
             (last.fontFamily || '') === (seg.fontFamily || '') &&
-            (last.fontSize ?? 0) === (seg.fontSize ?? 0)
+            (last.fontSize ?? 0) === (seg.fontSize ?? 0) &&
+            (last.fontClass ?? '') === (seg.fontClass ?? '') &&
+            (last.color ?? '') === (seg.color ?? '')
           ) {
             last.text += seg.text;
           } else {
@@ -298,6 +342,9 @@ function detectTextBlocksImpl(
 
         // Use the first line's alignment for the whole block.
         const blockAlign = head.align || 'left';
+
+        // Block-level color: first atom's color (fallback to '#000000').
+        const blockColor = head.atoms[0]?.color || '#000000';
 
         blocks.push({
           id: `tb-${pageIndex}-${idx}`,
@@ -310,12 +357,13 @@ function detectTextBlocksImpl(
           text,
           font: head.font,
           fontSize: head.size,
-          color: '#000000',
+          color: blockColor,
           lineHeight: Math.max(0.5, Math.round(lineHeight * 100) / 100),
           bold: head.bold,
           italic: head.italic,
           segments: segs,
           align: blockAlign,
+          fontClass: head.fontClass,
         });
       });
       return blocks;

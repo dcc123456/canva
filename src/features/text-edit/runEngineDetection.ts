@@ -10,8 +10,6 @@ import { useDocumentStore } from '../../store/documentStore';
 import { useEditorStore } from '../../store/editorStore';
 import { useEngineStore } from '../../store/engineStore';
 import { toast } from '../../utils/toast';
-import { loadDocument } from '../../core/pdf/loader';
-import { extractTextColors, matchColorsToBlocks } from '../../core/pdf/textColor';
 
 export type DetectionKind = 'edit-text' | 'form';
 
@@ -64,32 +62,8 @@ export async function runEngineDetection(t: DetectionKind): Promise<void> {
         },
       });
 
-      // Phase B: 颜色抽取 -- 用 pdfjs getOperatorList 获取文字真实颜色,
-      // 按 y-up <-> y-down 位置匹配到 MuPDF 检测的 block。
-      if (blocks.length > 0) {
-        try {
-          const pdfjsDoc = await loadDocument(safeBytes);
-          const pdfjsPage = await pdfjsDoc.getPage(pageIndex + 1);
-          const viewport = pdfjsPage.getViewport({ scale: 1 });
-          const coloredTexts = await extractTextColors(pdfjsPage);
-          const colorMap = matchColorsToBlocks(
-            coloredTexts,
-            blocks.map((b) => ({ id: b.id, bbox: b.bbox })),
-            viewport.height
-          );
-          for (const b of blocks) {
-            const c = colorMap.get(b.id);
-            if (c) b.color = c;
-          }
-          pdfjsPage.cleanup();
-          await pdfjsDoc.cleanup();
-        } catch (err) {
-          console.warn(
-            '[runEngineDetection] 颜色抽取失败,使用默认颜色:',
-            err
-          );
-        }
-      }
+      // ADR 0002: 颜色抽取现在在 mupdfEngine 内部按 atom 级完成,
+      // 这里不再做块级颜色覆盖。
 
       if (currentPage) {
         for (const b of blocks) {
@@ -110,6 +84,7 @@ export async function runEngineDetection(t: DetectionKind): Promise<void> {
             align: b.align,
             segments: b.segments,
             originalSegments: b.segments,
+            fontClass: b.fontClass,
           });
         }
       }
