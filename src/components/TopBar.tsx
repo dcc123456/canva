@@ -5,7 +5,6 @@
 //
 // Height: h-11 (44px). Uses --accent CSS variables for the export button.
 import { useState } from 'react';
-import clsx from 'clsx';
 import { useHistoryStore } from '../store/historyStore';
 import { useEngineStore } from '../store/engineStore';
 import { exportPdf } from '../features/export/exportPdf';
@@ -31,6 +30,14 @@ export interface TopBarProps {
   onProjectLoaded?: () => void;
   onOpenTemplates?: () => void;
 }
+
+const ACCENT_COLOR_LABELS: Record<AccentColor, string> = {
+  blue: '蓝色',
+  purple: '紫色',
+  green: '绿色',
+  rose: '玫瑰',
+  amber: '琥珀',
+};
 
 export function TopBar({ onOpenFile, onProjectLoaded, onOpenTemplates }: TopBarProps) {
   const pastLen = useHistoryStore((s) => s.past.length);
@@ -215,24 +222,25 @@ export function TopBar({ onOpenFile, onProjectLoaded, onOpenTemplates }: TopBarP
 
         <div className="h-5 w-px bg-gray-200 dark:bg-gray-600" />
 
-        {/* Accent color picker: 5 small color circles */}
-        <div className="flex items-center gap-1">
+        {/* Accent color picker: dropdown */}
+        <select
+          value={accent}
+          onChange={(e) => handleAccentChange(e.target.value as AccentColor)}
+          title="主题色"
+          className="h-7 rounded-md border border-gray-200 bg-white px-1 text-xs text-gray-700 hover:bg-gray-100 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
+        >
           {ACCENT_COLOR_KEYS.map((color) => (
-            <button
-              key={color}
-              type="button"
-              title={color}
-              onClick={() => handleAccentChange(color)}
-              className={clsx(
-                'h-4 w-4 rounded-full border-2 transition',
-                accent === color
-                  ? 'border-gray-400 dark:border-gray-300'
-                  : 'border-transparent opacity-60 hover:opacity-100'
-              )}
-              style={{ backgroundColor: ACCENT_COLORS[color].main }}
-            />
+            <option key={color} value={color}>
+              {ACCENT_COLOR_LABELS[color]}
+            </option>
           ))}
-        </div>
+        </select>
+        {/* Current accent color swatch */}
+        <span
+          aria-hidden
+          className="h-3.5 w-3.5 rounded-full border border-gray-300"
+          style={{ backgroundColor: ACCENT_COLORS[accent].main }}
+        />
 
         <div className="h-5 w-px bg-gray-200 dark:bg-gray-600" />
 

@@ -1,21 +1,17 @@
 // Inspector: right-side property panel for the currently selected overlay.
 // - Common: X / Y / W / H / rotation + delete.
 // - Text: font family (built-ins + Chinese fonts + Custom), size, color,
-//   bold/italic/underline, align, line-height, rich-text contenteditable.
-// - TextBlock: same as Text plus commit-on-blur via useCommitTextBlock.
-import { useEffect, useMemo, useRef, useState } from 'react';
+//   bold/italic/underline, align, line-height.
+// - TextBlock: same as Text. Text content is edited on the canvas.
+import { useMemo } from 'react';
 import clsx from 'clsx';
 import { useDocumentStore } from '../store/documentStore';
 import { useEditorStore } from '../store/editorStore';
-import { useCommitTextBlock } from '../features/text-edit/useCommitTextBlock';
-import { FloatingTextToolbar } from './FloatingTextToolbar';
 import type {
   DrawingItem,
   HighlightItem,
   ImageItem,
   OverlayItem,
-  PageMeta,
-  RichTextSegment,
   StickyNoteItem,
   TextAlign,
   TextBlockItem,
@@ -34,118 +30,6 @@ const BUILTIN_FONTS = [
 type BuiltinFont = (typeof BUILTIN_FONTS)[number];
 const isBuiltinFont = (s: string): s is BuiltinFont =>
   (BUILTIN_FONTS as readonly string[]).includes(s);
-
-// ---------- Rich-text segment utilities --------------------------------------
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
-
-/** Convert rgb(r, g, b) to #rrggbb; pass through hex and named colors. */
-function normalizeColor(color: string): string {
-  const m = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
-  if (m) {
-    const r = parseInt(m[1]).toString(16).padStart(2, '0');
-    const g = parseInt(m[2]).toString(16).padStart(2, '0');
-    const b = parseInt(m[3]).toString(16).padStart(2, '0');
-    return `#${r}${g}${b}`;
-  }
-  return color;
-}
-
-/** Build innerHTML for the contenteditable from segments (or plain text). */
-function segmentsToHtml(
-  segments: RichTextSegment[] | undefined,
-  text: string
-): string {
-  if (!segments || segments.length === 0) {
-    return escapeHtml(text).replace(/\n/g, '<br>');
-  }
-  return segments
-    .map((s) => {
-      let html = escapeHtml(s.text).replace(/\n/g, '<br>');
-      if (s.bold) html = `<b>${html}</b>`;
-      if (s.italic) html = `<i>${html}</i>`;
-      if (s.color) html = `<span style="color:${s.color}">${html}</span>`;
-      return html;
-    })
-    .join('');
-}
-
-/**
- * Walk a contenteditable's childNodes and extract RichTextSegments.
- * Handles <b>, <i>, <span style="color">, <font color>, <br>, and nesting.
- */
-function extractSegments(el: HTMLElement): {
-  text: string;
-  segments: RichTextSegment[];
-} {
-  const raw: RichTextSegment[] = [];
-
-  function walk(
-    node: Node,
-    pBold: boolean,
-    pItalic: boolean,
-    pColor?: string
-  ): void {
-    if (node.nodeType === Node.TEXT_NODE) {
-      const t = node.textContent ?? '';
-      if (t) {
-        const seg: RichTextSegment = { text: t };
-        if (pBold) seg.bold = true;
-        if (pItalic) seg.italic = true;
-        if (pColor) seg.color = pColor;
-        raw.push(seg);
-      }
-      return;
-    }
-    if (node.nodeType !== Node.ELEMENT_NODE) return;
-    const elem = node as HTMLElement;
-    if (elem.tagName === 'BR') {
-      const seg: RichTextSegment = { text: '\n' };
-      if (pBold) seg.bold = true;
-      if (pItalic) seg.italic = true;
-      if (pColor) seg.color = pColor;
-      raw.push(seg);
-      return;
-    }
-    const bold =
-      pBold ||
-      elem.tagName === 'B' ||
-      elem.style.fontWeight === 'bold' ||
-      elem.style.fontWeight === '700';
-    const italic =
-      pItalic || elem.tagName === 'I' || elem.style.fontStyle === 'italic';
-    const color =
-      normalizeColor(elem.style.color || elem.getAttribute('color') || '') ||
-      pColor;
-    elem.childNodes.forEach((c) => walk(c, bold, italic, color));
-  }
-
-  el.childNodes.forEach((c) => walk(c, false, false, undefined));
-
-  // Merge adjacent segments with identical formatting.
-  const merged: RichTextSegment[] = [];
-  for (const seg of raw) {
-    const last = merged[merged.length - 1];
-    if (
-      last &&
-      !!last.bold === !!seg.bold &&
-      !!last.italic === !!seg.italic &&
-      (last.color || '') === (seg.color || '')
-    ) {
-      last.text += seg.text;
-    } else {
-      merged.push({ ...seg });
-    }
-  }
-
-  const fullText = merged.map((s) => s.text).join('');
-  return { text: fullText, segments: merged };
-}
 
 // ---------- Shared sub-components --------------------------------------------
 
@@ -362,88 +246,11 @@ function FontSelector({
 }
 
 /**
- * RichTextEditor: a contenteditable div with a B/I/color toolbar.
- * Used by both TextControls (TextItem) and TextBlockControls (TextBlockItem).
- *
- * The editor is uncontrolled: initial content is set via innerHTML on mount
- * and whenever the external text changes while the editor is not focused.
- * On blur the parent's onCommit callback receives the extracted plain text
- * and RichTextSegment[].
+ * RichTextEditor was previously defined here for editing text content inline
+ * in the Inspector panel. Text content is now edited on the canvas via the
+ * TipTap-based editor in features/text-edit. The Inspector only handles
+ * property controls (font / size / color / align / etc).
  */
-function RichTextEditor({
-  editorRef,
-  initialText,
-  initialSegments,
-  font,
-  fontSize,
-  color,
-  bold,
-  italic,
-  onInput,
-  onBlur,
-}: {
-  editorRef: React.RefObject<HTMLDivElement | null>;
-  initialText: string;
-  initialSegments?: RichTextSegment[];
-  font: string;
-  fontSize: number;
-  color: string;
-  bold: boolean;
-  italic: boolean;
-  onInput?: () => void;
-  onBlur?: () => void;
-}) {
-  // Set / refresh innerHTML when the external source text changes and the
-  // editor is not focused (avoids clobbering the user's in-progress edit).
-  useEffect(() => {
-    const el = editorRef.current;
-    if (!el) return;
-    if (document.activeElement === el) return;
-    const html = segmentsToHtml(initialSegments, initialText);
-    if (el.innerHTML !== html) {
-      el.innerHTML = html;
-    }
-  }, [initialText, initialSegments, editorRef]);
-
-  return (
-    <div>
-      <FloatingTextToolbar editorRef={editorRef} />
-      {/* contenteditable body */}
-      <div
-        ref={editorRef}
-        contentEditable
-        suppressContentEditableWarning
-        onPointerDown={(e) => e.stopPropagation()}
-        onInput={() => onInput?.()}
-        onBlur={() => onBlur?.()}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-            e.preventDefault();
-            (e.currentTarget as HTMLElement).blur();
-          } else if (e.key === 'Escape') {
-            e.preventDefault();
-            const el = editorRef.current;
-            if (el) {
-              el.innerHTML = segmentsToHtml(initialSegments, initialText);
-            }
-            (e.currentTarget as HTMLElement).blur();
-          }
-        }}
-        className="min-h-[3rem] rounded border border-gray-300 px-1 py-0.5 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400"
-        style={{
-          fontFamily: font,
-          fontSize: `${Math.max(10, Math.min(20, fontSize))}px`,
-          color,
-          fontWeight: bold ? 700 : 400,
-          fontStyle: italic ? 'italic' : 'normal',
-          lineHeight: '1.2',
-          whiteSpace: 'pre-wrap',
-          wordBreak: 'break-word',
-        }}
-      />
-    </div>
-  );
-}
 
 // ---------- Main Inspector ----------------------------------------------------
 
@@ -451,7 +258,6 @@ export function Inspector() {
   const selectedId = useEditorStore((s) => s.selectedOverlayId);
   const setSelectedOverlayId = useEditorStore((s) => s.setSelectedOverlayId);
   const overlays = useDocumentStore((s) => s.overlays);
-  const pages = useDocumentStore((s) => s.pages);
   const updateOverlay = useDocumentStore((s) => s.updateOverlay);
   const removeOverlay = useDocumentStore((s) => s.removeOverlay);
 
@@ -536,7 +342,6 @@ export function Inspector() {
       {item.type === 'text-block' && (
         <TextBlockControls
           item={item as TextBlockItem}
-          page={pages.find((p) => p.id === (item as TextBlockItem).pageId) ?? null}
           updateOverlay={updateOverlay}
         />
       )}
@@ -594,7 +399,6 @@ function TextControls({
   item: TextItem;
   updateOverlay: (id: string, patch: Partial<OverlayItem>) => void;
 }) {
-  const editorRef = useRef<HTMLDivElement | null>(null);
   const align: TextAlign = item.align || 'left';
 
   return (
@@ -661,33 +465,6 @@ function TextControls({
             onChange={(a) => updateOverlay(item.id, { align: a } as Partial<OverlayItem>)}
           />
         </div>
-        {/* Phase 6: contenteditable rich-text editor */}
-        <label className="flex flex-col gap-1 text-xs text-gray-600">
-          文字内容
-          <RichTextEditor
-            key={item.id}
-            editorRef={editorRef}
-            initialText={item.text}
-            initialSegments={item.segments}
-            font={item.font}
-            fontSize={item.fontSize}
-            color={item.color}
-            bold={item.bold}
-            italic={item.italic}
-            onBlur={() => {
-              const el = editorRef.current;
-              if (!el) return;
-              const { text, segments } = extractSegments(el);
-              const hasFormatting = segments.some(
-                (s) => s.bold || s.italic || s.color
-              );
-              updateOverlay(item.id, {
-                text,
-                segments: hasFormatting ? segments : undefined,
-              } as Partial<OverlayItem>);
-            }}
-          />
-        </label>
       </div>
     </div>
   );
@@ -802,32 +579,17 @@ function DrawingControls({
 // ---------- TextBlockControls ------------------------------------------------
 //
 // Inspector 面板里的"原文本块"控件:
-//   * 文字内容 contenteditable -- 提交时调 useCommitTextBlock。
 //   * 字体 / 字号 / 颜色 / 行距 / 对齐 -- 只影响 flatten 阶段重画新文字
 //     的视觉效果,不需要再过引擎,直接 updateOverlay 即可。
+//   * 文字内容编辑在画布上的 TipTap 编辑器中完成 (双击文本块进入编辑)。
 function TextBlockControls({
   item,
-  page,
   updateOverlay,
 }: {
   item: TextBlockItem;
-  page: PageMeta | null;
   updateOverlay: (id: string, patch: Partial<OverlayItem>) => void;
 }) {
-  const { commit } = useCommitTextBlock();
-  const editorRef = useRef<HTMLDivElement | null>(null);
-  const [dirty, setDirty] = useState(false);
   const align: TextAlign = item.align || 'left';
-
-  function flush() {
-    const el = editorRef.current;
-    if (!el) return;
-    const { text, segments } = extractSegments(el);
-    setDirty(false);
-    if (!page) return;
-    if (text === item.text && segments === undefined) return;
-    commit({ block: item, pageIndex: page.index, newText: text, segments });
-  }
 
   return (
     <div className="rounded border bg-white p-2">
@@ -836,46 +598,6 @@ function TextBlockControls({
       </div>
 
       <div className="flex flex-col gap-2">
-        <div>
-          <span className="flex items-center justify-between text-xs text-gray-600">
-            <span>文字内容</span>
-            {dirty && (
-              <span className="text-[10px] text-amber-700">未提交</span>
-            )}
-          </span>
-          <div className="mt-1">
-            <RichTextEditor
-              key={item.id}
-              editorRef={editorRef}
-              initialText={item.text}
-              initialSegments={item.segments}
-              font={item.font}
-              fontSize={item.fontSize}
-              color={item.color || '#000000'}
-              bold={item.bold}
-              italic={item.italic}
-              onInput={() => setDirty(true)}
-              onBlur={flush}
-            />
-          </div>
-          <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-gray-500">
-            <span>提交: 失焦或 Ctrl+Enter · 取消: Esc</span>
-            <button
-              type="button"
-              onClick={() => editorRef.current?.blur()}
-              disabled={!dirty}
-              className={clsx(
-                'rounded border px-2 py-0.5 text-[10px]',
-                dirty
-                  ? 'border-blue-400 bg-blue-50 text-blue-700 hover:bg-blue-100'
-                  : 'border-gray-200 bg-gray-50 text-gray-400'
-              )}
-            >
-              提交
-            </button>
-          </div>
-        </div>
-
         <label className="flex flex-col gap-1 text-xs text-gray-600">
           字体
           <FontSelector

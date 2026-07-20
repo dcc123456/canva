@@ -7,12 +7,11 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
-import { TextStyle } from '@tiptap/extension-text-style';
+import { TextStyle, FontSize } from '@tiptap/extension-text-style';
 import { Color } from '@tiptap/extension-color';
 import { Underline } from '@tiptap/extension-underline';
 import { FontFamily } from '@tiptap/extension-font-family';
 import { Text } from '@tiptap/extension-text';
-import { Extension } from '@tiptap/core';
 import type { Editor, JSONContent } from '@tiptap/core';
 import type { FontClass, RichTextSegment, TextBlockItem } from '../../core/types';
 import { FONT_CLASS_TO_CSS } from '../../core/engine/fontClassify';
@@ -28,29 +27,11 @@ const PreserveText = Text.extend({
 });
 
 // ---------- Custom FontSize extension -----------------------------------------
-// Adds fontSize attribute to the textStyle mark via global attributes,
-// coexisting with Color and FontFamily.
-const FontSize = Extension.create({
-  name: 'fontSize',
-  addGlobalAttributes() {
-    return [
-      {
-        types: ['textStyle'],
-        attributes: {
-          fontSize: {
-            default: null,
-            parseHTML: (element: HTMLElement) =>
-              element.style.fontSize || null,
-            renderHTML: (attributes: Record<string, unknown>) => {
-              if (!attributes.fontSize) return {};
-              return { style: `font-size: ${attributes.fontSize}px` };
-            },
-          },
-        },
-      },
-    ];
-  },
-});
+// TipTap 3.x ships a built-in FontSize sub-extension via @tiptap/extension-text-style
+// (imported above). It exposes `setFontSize(string)` / `unsetFontSize()` commands
+// and stores the value as a CSS string (e.g. '16px'). The conversion between
+// the segment's numeric fontSize and the CSS string happens in
+// segmentsToTipTapContent / editorToSegments below.
 
 // ---------- Style key for merge comparison ------------------------------------
 
@@ -111,7 +92,9 @@ export function segmentsToTipTapContent(
 
     const tsAttrs: Record<string, unknown> = {};
     if (color) tsAttrs.color = color;
-    if (fontSize) tsAttrs.fontSize = fontSize;
+    // Built-in FontSize stores a CSS string (e.g. '16px'); convert from the
+    // numeric segment value.
+    if (fontSize) tsAttrs.fontSize = `${fontSize}px`;
     if (cssFontFamily) tsAttrs.fontFamily = cssFontFamily;
     if (Object.keys(tsAttrs).length > 0) {
       marks.push({ type: 'textStyle', attrs: tsAttrs });
@@ -182,11 +165,17 @@ export function editorToSegments(
       const ts = marks.find((m) => m.type === 'textStyle');
       const attrs = ts?.attrs as Record<string, unknown> | undefined;
       const color = (attrs?.color as string) || inherited.color;
-      const fontSize = (attrs?.fontSize as number | undefined) || inherited.fontSize;
+      // Built-in FontSize stores the value as a CSS string (e.g. '16px').
+      // Parse it back to a number for RichTextSegment.
+      const fontSizeRaw = (attrs?.fontSize as string | number | undefined) ?? inherited.fontSize;
+      const fontSize =
+        typeof fontSizeRaw === 'string'
+          ? parseFloat(fontSizeRaw)
+          : fontSizeRaw;
       const fontFamily = (attrs?.fontFamily as string | undefined) || inherited.fontFamily;
       const fontClass = (attrs?.fontClass as FontClass | undefined) || inherited.fontClass;
       if (color) seg.color = color;
-      if (fontSize) seg.fontSize = fontSize;
+      if (fontSize && Number.isFinite(fontSize)) seg.fontSize = fontSize;
       if (fontFamily) seg.fontFamily = fontFamily;
       if (fontClass) seg.fontClass = fontClass;
       raw.push(seg);
@@ -266,6 +255,11 @@ export function RichTextEditor({
   const latestContentRef = useRef<{ text: string; segments: RichTextSegment[] } | null>(null);
   const committedRef = useRef(false);
   const [toolbarRect, setToolbarRect] = useState<DOMRect | null>(null);
+  // Ref to the floating toolbar DOM node. Used to detect whether a blur of the
+  // editor was caused by clicking inside the toolbar (e.g., the font-size
+  // input or font-family select) -- if so, we keep the editor mounted and the
+  // toolbar visible so the user can finish interacting with the control.
+  const toolbarRef = useRef<HTMLDivElement | null>(null);
 
   const doCommit = useCallback((text: string, segments: RichTextSegment[]) => {
     if (committedRef.current) return;
@@ -337,8 +331,20 @@ export function RichTextEditor({
     },
     onBlur: ({ editor: ed }) => {
       const { text, segments } = editorToSegments(ed);
-      doCommit(text, segments);
-      setToolbarRect(null);
+      // Defer the commit decision: if focus moved into the floating toolbar
+      // (e.g., the font-size input or font-family select), keep the editor
+      // mounted and the toolbar visible. Only commit when focus truly leaves
+      // both the editor and the toolbar.
+      window.setTimeout(() => {
+        const active = document.activeElement;
+        const toolbar = toolbarRef.current;
+        if (toolbar && active && toolbar.contains(active)) {
+          // Focus moved into the toolbar -- keep editing.
+          return;
+        }
+        doCommit(text, segments);
+        setToolbarRect(null);
+      }, 0);
     },
     onSelectionUpdate: ({ editor: ed }) => {
       const sel = ed.state.selection;
@@ -386,6 +392,20 @@ export function RichTextEditor({
   const isUnderline = editor?.isActive('underline') ?? false;
   const isStrike = editor?.isActive('strike') ?? false;
 
+  // Active textStyle attributes for the floating toolbar display.
+  const textStyleAttrs = (editor?.getAttributes('textStyle') ?? {}) as {
+    fontSize?: string | null;
+    fontFamily?: string | null;
+  };
+  // Built-in FontSize stores a CSS string (e.g. '16px'); parse to number for the input.
+  const fontSizeNum = textStyleAttrs.fontSize
+    ? parseFloat(textStyleAttrs.fontSize)
+    : NaN;
+  const currentFontSize = Number.isFinite(fontSizeNum)
+    ? fontSizeNum
+    : block.fontSize;
+  const currentFontFamily = textStyleAttrs.fontFamily || '';
+
   const btnBase: React.CSSProperties = {
     padding: '2px 6px',
     borderRadius: '3px',
@@ -393,7 +413,27 @@ export function RichTextEditor({
     cursor: 'pointer',
     fontSize: '12px',
     minWidth: '24px',
+    // Explicit text color: the toolbar background is always white, so use
+    // dark gray for inactive and accent-blue for active. Without this the
+    // buttons inherit the document's text color (light gray in dark mode)
+    // and become invisible on the white toolbar.
+    color: '#374151',
   };
+  const btnActive: React.CSSProperties = {
+    background: '#dbeafe',
+    color: '#1e40af',
+  };
+  const btnInactive: React.CSSProperties = {
+    background: '#fff',
+  };
+
+  const FONT_FAMILY_OPTIONS: { value: string; label: string }[] = [
+    { value: FONT_CLASS_TO_CSS.sans, label: '无衬线' },
+    { value: FONT_CLASS_TO_CSS.serif, label: '衬线' },
+    { value: FONT_CLASS_TO_CSS.mono, label: '等宽' },
+    { value: FONT_CLASS_TO_CSS['cjk-sans'], label: '中文无衬线' },
+    { value: FONT_CLASS_TO_CSS['cjk-serif'], label: '中文衬线' },
+  ];
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-white">
@@ -404,6 +444,7 @@ export function RichTextEditor({
       />
       {toolbarRect && (
         <div
+          ref={toolbarRef}
           style={{
             position: 'fixed',
             top: Math.max(4, toolbarRect.top - 36),
@@ -411,31 +452,33 @@ export function RichTextEditor({
             transform: 'translateX(-50%)',
             zIndex: 1000,
             display: 'flex',
+            alignItems: 'center',
             gap: '3px',
             padding: '3px 6px',
             background: '#fff',
             border: '1px solid #d1d5db',
             borderRadius: '4px',
             boxShadow: '0 2px 6px rgba(0,0,0,0.15)',
+            color: '#374151',
           }}
         >
           <button type="button" title="粗体"
-            style={{ ...btnBase, fontWeight: 700, background: isBold ? '#dbeafe' : '#fff' }}
+            style={{ ...btnBase, fontWeight: 700, ...(isBold ? btnActive : btnInactive) }}
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => editor?.chain().focus().toggleBold().run()}
           >B</button>
           <button type="button" title="斜体"
-            style={{ ...btnBase, fontStyle: 'italic', background: isItalic ? '#dbeafe' : '#fff' }}
+            style={{ ...btnBase, fontStyle: 'italic', ...(isItalic ? btnActive : btnInactive) }}
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => editor?.chain().focus().toggleItalic().run()}
           >I</button>
           <button type="button" title="下划线"
-            style={{ ...btnBase, textDecoration: 'underline', background: isUnderline ? '#dbeafe' : '#fff' }}
+            style={{ ...btnBase, textDecoration: 'underline', ...(isUnderline ? btnActive : btnInactive) }}
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => editor?.chain().focus().toggleUnderline().run()}
           >U</button>
           <button type="button" title="删除线"
-            style={{ ...btnBase, textDecoration: 'line-through', background: isStrike ? '#dbeafe' : '#fff' }}
+            style={{ ...btnBase, textDecoration: 'line-through', ...(isStrike ? btnActive : btnInactive) }}
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => editor?.chain().focus().toggleStrike().run()}
           >S</button>
@@ -446,6 +489,72 @@ export function RichTextEditor({
             onMouseDown={(e) => e.preventDefault()}
             onChange={(e) => editor?.chain().focus().setColor(e.target.value).run()}
           />
+          <div style={{ width: '1px', height: '18px', background: '#d1d5db', margin: '0 2px' }} />
+          <label
+            title="字号"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '2px',
+              fontSize: '12px',
+              color: '#374151',
+            }}
+          >
+            <span style={{ padding: '0 2px' }}>A</span>
+            <input
+              type="number"
+              min={6}
+              max={144}
+              value={currentFontSize}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                if (Number.isFinite(v)) {
+                  editor?.chain().focus().setFontSize(`${Math.max(6, Math.min(144, v))}px`).run();
+                }
+              }}
+              style={{
+                width: '44px',
+                height: '22px',
+                padding: '0 4px',
+                border: '1px solid #d1d5db',
+                borderRadius: '3px',
+                fontSize: '12px',
+                textAlign: 'center',
+                color: '#374151',
+                background: '#fff',
+              }}
+            />
+          </label>
+          <select
+            title="字体"
+            value={currentFontFamily}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v) {
+                editor?.chain().focus().setFontFamily(v).run();
+              } else {
+                editor?.chain().focus().unsetFontFamily().run();
+              }
+            }}
+            style={{
+              height: '22px',
+              padding: '0 4px',
+              border: '1px solid #d1d5db',
+              borderRadius: '3px',
+              fontSize: '12px',
+              cursor: 'pointer',
+              maxWidth: '110px',
+              color: '#374151',
+              background: '#fff',
+            }}
+          >
+            <option value="">默认字体</option>
+            {FONT_FAMILY_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
         </div>
       )}
     </div>

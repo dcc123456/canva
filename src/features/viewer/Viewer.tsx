@@ -170,67 +170,69 @@ export function Viewer({ doc }: ViewerProps) {
 
       {/* Canvas area: centered scrollable container */}
       <div className="flex-1 overflow-auto bg-gray-100 dark:bg-gray-900">
-        {overlayPage && (
-          <div
-            className="relative inline-block"
-            style={{
-              width: renderW * zoom,
-              height: renderH * zoom,
-            }}
-          >
-            {isPdfPage ? (
-              <canvas
-                ref={canvasRef}
-                className="bg-white shadow"
-                style={{
-                  transform: `rotate(${overlayPage.rotation}deg)`,
-                  transformOrigin: 'center center',
-                }}
-              />
-            ) : (
-              <div className="flex h-full w-full items-center justify-center border border-dashed border-gray-300 bg-white text-sm text-gray-400 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-500">
-                空白页 (A4 595x842)
-              </div>
-            )}
-            {/* Overlay layer container: follows page rotation */}
+        <div className="flex min-h-full min-w-full items-center justify-center p-4">
+          {overlayPage && (
             <div
-              className="absolute inset-0"
+              className="relative inline-block"
               style={{
                 width: renderW * zoom,
                 height: renderH * zoom,
-                transform:
-                  overlayPage.rotation === 0
-                    ? undefined
-                    : `rotate(${overlayPage.rotation}deg)`,
-                transformOrigin: 'center center',
               }}
             >
+              {isPdfPage ? (
+                <canvas
+                  ref={canvasRef}
+                  className="bg-white shadow"
+                  style={{
+                    transform: `rotate(${overlayPage.rotation}deg)`,
+                    transformOrigin: 'center center',
+                  }}
+                />
+              ) : (
+                <div className="flex h-full w-full items-center justify-center border border-dashed border-gray-300 bg-white text-sm text-gray-400 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-500">
+                  空白页 (A4 595x842)
+                </div>
+              )}
+              {/* Overlay layer container: follows page rotation */}
               <div
+                className="absolute inset-0"
                 style={{
-                  width: overlayPage.width * zoom,
-                  height: overlayPage.height * zoom,
-                  position: 'absolute',
-                  left: '50%',
-                  top: '50%',
-                  transform: 'translate(-50%, -50%)',
+                  width: renderW * zoom,
+                  height: renderH * zoom,
+                  transform:
+                    overlayPage.rotation === 0
+                      ? undefined
+                      : `rotate(${overlayPage.rotation}deg)`,
+                  transformOrigin: 'center center',
                 }}
               >
-                <OverlayLayer page={overlayPage} />
-                <FormFieldOverlay page={overlayPage} />
-                <TextBlockEditLayer page={overlayPage} />
-                <CanvasInteractionLayer
-                  page={overlayPage}
-                  registerFileInput={registerFileInput}
-                />
+                <div
+                  style={{
+                    width: overlayPage.width * zoom,
+                    height: overlayPage.height * zoom,
+                    position: 'absolute',
+                    left: '50%',
+                    top: '50%',
+                    transform: 'translate(-50%, -50%)',
+                  }}
+                >
+                  <OverlayLayer page={overlayPage} />
+                  <FormFieldOverlay page={overlayPage} />
+                  <TextBlockEditLayer page={overlayPage} />
+                  <CanvasInteractionLayer
+                    page={overlayPage}
+                    registerFileInput={registerFileInput}
+                  />
+                </div>
               </div>
             </div>
-          </div>
-        )}
-        {!overlayPage && (
-          <div className="p-8 text-center text-sm text-gray-500 dark:text-gray-400">
-            打开 PDF 文件后即可开始编辑。
-          </div>
-        )}
+          )}
+          {!overlayPage && (
+            <div className="p-8 text-center text-sm text-gray-500 dark:text-gray-400">
+              打开 PDF 文件后即可开始编辑。
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -3,7 +3,6 @@
 //
 // Height: h-9 (36px). Reads everything from stores -- no props needed.
 import { useState } from 'react';
-import clsx from 'clsx';
 import { useEditorStore, ZOOM_LEVELS } from '../store/editorStore';
 import { useDocumentStore } from '../store/documentStore';
 
@@ -111,21 +110,20 @@ export function BottomBar() {
           −
         </button>
 
-        {ZOOM_LEVELS.map((z) => (
-          <button
-            key={z}
-            type="button"
-            onClick={() => setZoom(z)}
-            className={clsx(
-              'rounded px-1.5 py-0.5 transition',
-              Math.abs(zoom - z) < 0.001
-                ? 'bg-[var(--accent-light)] font-medium text-[var(--accent-text)]'
-                : 'hover:bg-gray-100 dark:hover:bg-gray-700'
-            )}
-          >
-            {Math.round(z * 100)}%
-          </button>
-        ))}
+        <select
+          value={ZOOM_LEVELS.reduce((prev, curr) =>
+            Math.abs(curr - zoom) < Math.abs(prev - zoom) ? curr : prev
+          )}
+          onChange={(e) => setZoom(Number(e.target.value))}
+          title="缩放"
+          className="h-6 rounded border border-gray-200 bg-white px-1 text-xs dark:border-gray-600 dark:bg-gray-700"
+        >
+          {ZOOM_LEVELS.map((z) => (
+            <option key={z} value={z}>
+              {Math.round(z * 100)}%
+            </option>
+          ))}
+        </select>
 
         <button
           type="button"

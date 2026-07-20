@@ -74,9 +74,10 @@ function PdfThumbnail({
         pdfPage.cleanup();
         return;
       }
-      const targetWidth = THUMB_W;
       const vp1 = pdfPage.getViewport({ scale: 1, rotation: page.rotation });
-      const scale = targetWidth / vp1.width;
+      // Fit the thumbnail inside the THUMB_W x THUMB_H box, preserving aspect
+      // ratio so tall pages no longer overflow vertically.
+      const scale = Math.min(THUMB_W / vp1.width, THUMB_H / vp1.height);
       const viewport = pdfPage.getViewport({ scale, rotation: page.rotation });
       const canvas = canvasRef.current;
       const ctx = canvas.getContext('2d');

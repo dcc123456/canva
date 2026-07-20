@@ -4,7 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { Viewer } from './features/viewer/Viewer';
 import { Sidebar } from './features/viewer/Sidebar';
 import { TopBar } from './components/TopBar';
-import { ToolSidebar } from './components/ToolSidebar';
+import { Toolbar } from './components/Toolbar';
 import { BottomBar } from './components/BottomBar';
 import { Inspector } from './components/Inspector';
 import { SignatureDialog } from './components/SignatureDialog';
@@ -127,7 +127,7 @@ function App() {
 
   return (
     <ErrorBoundary>
-      {/* Canva-style partitioned layout: TopBar / [ToolSidebar | Sidebar | Viewer | Inspector] / BottomBar */}
+      {/* Canva-style partitioned layout: TopBar / Toolbar / [Sidebar | Viewer | Inspector] / BottomBar */}
       <div className="flex h-screen w-screen flex-col bg-gray-100 text-gray-900 dark:bg-gray-900 dark:text-gray-100">
         <TopBar
           onOpenFile={handleOpenFile}
@@ -138,11 +138,11 @@ function App() {
           }}
           onOpenTemplates={() => setTemplatesOpen(true)}
         />
+        <Toolbar
+          onPickImage={pickImage}
+          onOpenSignature={() => setSignatureOpen(true)}
+        />
         <div className="flex flex-1 overflow-hidden">
-          <ToolSidebar
-            onPickImage={pickImage}
-            onOpenSignature={() => setSignatureOpen(true)}
-          />
           <Sidebar doc={doc} />
           <main className="flex-1 overflow-hidden">
             <PdfOrEmpty doc={doc} onOpenFile={handleOpenFile} />
